@@ -11,6 +11,31 @@ When the user is on mobile, assume `localhost`, `127.0.0.1`, and `::1` refer to 
 
 Do not present a desktop localhost URL as the primary mobile link. Use it only as a diagnostic local target.
 
+## Mobile Preview Mode
+
+Use the mode helper when the user asks to turn mobile preview behavior on, off, or automatic:
+
+```bash
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-mode.mjs get
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-mode.mjs set always
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-mode.mjs set auto
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-mode.mjs set off
+```
+
+Modes:
+
+| Mode | Behavior |
+|---|---|
+| `off` | Do not proactively use this skill unless the user explicitly asks for mobile access. |
+| `auto` | Use this skill for strong local-link, preview, callback, webhook, or mobile signals. |
+| `always` | Default to this skill for openable local services, local previews, and Markdown documents intended for reading. |
+
+If the mode file is missing or invalid, treat the mode as `auto`.
+
+The helper stores mode state inside this skill's gitignored `.local/` directory and renders `agents/openai.yaml` from `agents/openai.yaml.template` so the Codex UI metadata can show the current mode without making `SKILL.md` dirty. Do not hand-edit the generated `agents/openai.yaml`.
+
+Generated UI metadata uses an emoji badge such as `📱 auto`, `🟢 always`, or `⚪ off` so the mobile skill chip is easier to scan. Codex App may cache skill metadata; if the chip still shows the old mode, tell the user to restart or reload Codex App.
+
 ## Decision Chain
 
 1. Identify the target: local port, dev server URL, API callback, webhook endpoint, or Markdown/file preview.

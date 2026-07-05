@@ -1,4 +1,0 @@
-interface:
-  display_name: "On Mobile"
-  short_description: "Use Tailscale-first local app and Markdown mobile previews"
-  default_prompt: "Use $on-mobile when I am on my phone and need to access a local localhost app, API, dev server, or rendered Markdown file."

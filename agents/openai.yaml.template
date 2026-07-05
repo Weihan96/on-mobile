@@ -1,0 +1,4 @@
+interface:
+  display_name: "On Mobile"
+  short_description: "{{mode_badge}} · Mobile previews for local apps & docs"
+  default_prompt: "Use $on-mobile when I am on my phone, need a mobile-accessible local preview link, or want to set mobile preview mode on, auto, or off."
