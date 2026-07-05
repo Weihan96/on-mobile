@@ -1,166 +1,124 @@
 ---
 name: on-mobile
-description: Use when the user explicitly invokes $on-mobile, says they are on a phone/mobile device, asks to preview or test a localhost app or local Markdown file from a mobile device, or needs a local development server or rendered Markdown preview URL that works outside the desktop machine. Requires replacing localhost/127.0.0.1/::1 links with an ngrok public HTTPS URL for mobile access.
+description: Use when the user is on a phone/mobile device, explicitly invokes $on-mobile, asks to preview or test a localhost app/API/dev server/callback/webhook/Markdown file from mobile, or needs a local URL that works outside the development machine. Prefer private Tailscale links for the user's own mobile devices; use ngrok only as fallback when Tailscale is unavailable, insufficient, or public internet access is required.
 ---
 
 # On Mobile
 
-## Overview
+## Default Rule
 
-When working for a user who is on mobile, assume `localhost`, `127.0.0.1`, and `::1` refer to the user's phone, not the development machine. For local web apps, create or reuse an ngrok tunnel and give the user the ngrok HTTPS URL instead of a localhost URL.
+When the user is on mobile, assume `localhost`, `127.0.0.1`, and `::1` refer to the phone, not the development machine.
 
-For local Markdown files, do not send a raw file path or Codex drawer/source view as the primary answer. Render the Markdown to HTML with a local Markdown server, preserve relative image/assets paths, then expose that server through ngrok.
+Do not present a desktop localhost URL as the primary mobile link. Use it only as a diagnostic local target.
 
-## Localhost Rule
+## Decision Chain
 
-Use ngrok whenever all of these are true:
+1. Identify the target: local port, dev server URL, API callback, webhook endpoint, or Markdown/file preview.
+2. If the target is an existing local port, prefer `scripts/mobile-url-for-port.mjs`.
+3. If the target is a Markdown file or directory, prefer `scripts/serve-markdown-mobile.mjs`.
+4. If the user's own phone or tablet is in the tailnet, prefer Tailscale direct HTTP: `http://<tailscale-ip>:<port>/<path>`.
+5. If HTTPS is required inside the tailnet, or the local service is loopback-only, use Tailscale Serve.
+6. If the recipient is not in the user's tailnet, or an external service must call back to the local machine, use ngrok fallback.
+7. If the user needs to judge mobile interactions, verify the final mobile URL itself, not only localhost.
+8. If the preview must stay open while the user checks it, keep the server attached to a foreground command session.
 
-- The user is on mobile, explicitly invokes `$on-mobile`, or asks for a phone-accessible preview.
-- The app, API, dev server, callback, webhook receiver, or preview is bound to a local port.
-- You would otherwise give the user a `localhost`, `127.0.0.1`, or `::1` URL.
+Use this routing table:
 
-Do not present a localhost URL as the primary link for the mobile user. Give the ngrok URL first.
+| Situation | Primary mobile URL |
+|---|---|
+| User's phone is on the same tailnet and the app listens on a reachable interface | Tailscale direct HTTP |
+| MagicDNS is available and the phone resolves tailnet names | Tailscale direct MagicDNS alternate |
+| HTTPS is required inside the tailnet | Tailscale Serve HTTPS |
+| The service only listens on `127.0.0.1` | Tailscale Serve to the loopback service |
+| Recipient is not in the user's tailnet | ngrok fallback |
+| Webhook, OAuth callback, or external provider must reach the local server | ngrok fallback |
+| Phone cannot keep Tailscale enabled because of VPN-slot conflicts | ngrok fallback or explain the tradeoff |
 
-## Workflow
+## Existing Port Helper
 
-1. Identify the local port from the dev server output, configuration, or port scan.
-2. Start the local server if the task requires a running preview.
-   - If the user needs to judge mobile interaction behavior, prefer a production preview over a development server when the project supports it. For Next.js projects, prefer `bun run build` followed by `bun run start -- -p <port>` for the mobile ngrok URL.
-   - Use `next dev`/dev-server tunnels for quick visual previews only unless interaction has also been verified through the public URL.
-3. Check whether an ngrok tunnel for that port already exists.
-4. If no suitable tunnel exists, start one with `ngrok http <port>`.
-5. If ngrok starts but no public tunnel appears, diagnose ngrok before falling back to a LAN URL.
-6. Read the forwarding URL from ngrok output or the local ngrok API at `http://127.0.0.1:4040/api/tunnels`.
-7. Give the user the `https://...ngrok...` URL and mention the local port it forwards to.
-
-## Commands
-
-Prefer commands that preserve the existing project tooling. For JavaScript and TypeScript projects, prefer Bun commands when starting the app.
-
-Useful checks:
-
-```bash
-ngrok http <port>
-curl --silent http://127.0.0.1:4040/api/tunnels
-```
-
-If `ngrok` is missing, tell the user and ask whether to install or configure it. If ngrok requires auth, report the exact blocker and avoid inventing a public URL.
-
-## Markdown Preview For Mobile
-
-Use this flow when the user is on mobile and wants to read a local `.md` file, README, design note, report, or Markdown artifact with rendered formatting or images.
-
-When composing Markdown directly for a Codex mobile user, do not assume the mobile conversation renderer supports full GitHub-flavored Markdown or arbitrary HTML. Prefer plain tables, normal links, blockquotes, and code blocks. Avoid relying on GitHub callouts, HTML `<details>`, or remote URL Markdown image rendering inside the conversation. Local host file-path images may render when Codex can access the file, but still provide a normal link, artifact, or mobile preview URL when the image is important. For the observed support matrix and safer alternatives, read `references/codex-mobile-markdown-rendering.md`.
-
-Prefer the bundled helper script:
+For a local app, API, dashboard, or dev server already running on a known port, run:
 
 ```bash
-bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs <markdown-file-or-directory> --port 8642
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <port> --path /
 ```
 
-The script should:
-
-1. Resolve the Markdown target.
-2. Serve the git repository root when the target is inside a git repo; otherwise serve the Markdown file's parent directory or the requested directory.
-3. Start Markserv bound to `0.0.0.0`.
-4. Verify the local rendered Markdown URL returns HTML.
-5. Verify at least one local relative image when the rendered HTML contains images.
-6. Reuse or create an ngrok HTTPS tunnel for the Markserv port.
-7. Verify the public Markdown URL, then report it as the primary mobile link.
-
-Markserv discovery and installation policy:
-
-- First use a stable installed command discovered with `command -v markserv`.
-- If no stable `markserv` command exists, use `bunx markserv` only as a temporary fallback for the current preview.
-- When the fallback is used, tell the user that repeated use should install Markserv persistently:
+Useful modes:
 
 ```bash
-bun add -g markserv
+# Default: Tailscale first, ngrok fallback.
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --path /cards
+
+# Require Tailscale and fail instead of using ngrok.
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --path /cards --access tailscale
+
+# Force public ngrok fallback.
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --path /cards --access ngrok
+
+# Prefer Tailscale Serve HTTPS. This may create persistent Serve config.
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --path /cards --https
 ```
 
-- Do not rely on or document Bun's temporary `bunx-*` cache paths as stable Markserv entrypoints.
-- Do not automatically run a global install unless the user explicitly asks for persistent installation.
+Read `references/tailscale-access.md` before manually rebuilding Tailscale checks, Serve setup, MagicDNS caveats, or direct/relay diagnostics.
 
-If the helper script is unavailable, use the same behavior manually. A typical stable Markserv command is:
+## Markdown Preview Helper
+
+For rendered Markdown on mobile, run:
 
 ```bash
-markserv <serve-root> -p <port> -a 0.0.0.0 --browser false --livereloadport false
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs <markdown-file-or-directory>
 ```
 
-Choose the served root so Markdown image paths keep working. For example, if `docs/design/note.md` contains `![x](./note/01.png)`, serving the repository root and opening `/docs/design/note.md` should keep the image URL valid.
+The helper serves the right root for relative images, verifies local HTML, prefers Tailscale, falls back to ngrok when allowed, and prints the mobile URL.
 
-Validation for Markdown previews:
+Keep the command running in the foreground while the user checks the link. Do not use `nohup ... &`, shell background jobs, or one-shot detached commands for live previews; those processes may be reclaimed after the parent command exits.
 
-- Check the local Markdown page returns `200` and `content-type: text/html`.
-- If images are present, check at least one local image returns `200`.
-- Check the ngrok public page returns `200`; include `ngrok-skip-browser-warning: 1` in scripted validation requests.
-- If image validation fails but the page renders, still give the page URL and mention that image paths or the served root may need adjustment.
+Useful modes:
+
+```bash
+# Require Tailscale and fail instead of falling back to ngrok.
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs ./README.md --access tailscale
+
+# Force old ngrok behavior.
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs ./README.md --access ngrok
+
+# Prefer Tailscale Serve HTTPS inside the tailnet.
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs ./README.md --https
+```
+
+Read `references/markdown-preview.md` for Markserv installation policy, Codex mobile Markdown rendering caveats, image validation, and preview process lifetime details.
+
+## ngrok Fallback
+
+Use ngrok only when Tailscale is unavailable, insufficient, explicitly requested, or the task needs a public internet URL.
+
+Read `references/ngrok-fallback.md` before using ngrok. That reference covers tunnel discovery, warning-page behavior, public URL reporting, interaction validation over ngrok, and the known IPv6/EOF workaround.
+
+Do not use Tailscale Funnel unless the user explicitly needs a public internet URL. Funnel is public; Tailscale Serve is tailnet-only.
 
 ## Mobile Interaction Validation
 
-When the mobile preview is meant to validate clicks, taps, selects, dropdowns, dialogs, drag handles, or other interactive UI, do not trust a development-server tunnel by default. Development runtimes can add HMR, overlay, websocket, or bundler clients that behave differently through ngrok than they do on localhost. In particular, a Next.js `next dev` tunnel can render the page while public-url interaction state fails to update.
+When the user needs to validate taps, forms, selects, dialogs, drag handles, auth callbacks, or other mobile behavior, verify the exact URL the phone will open.
 
-Prefer this shape for interaction checks:
+Use dev-server previews for quick visual checks only. Prefer a production preview when the project supports it and the interaction result matters.
 
-```bash
-bun run build
-bun run start -- -p <port>
-ngrok http <port>
-```
+If a mobile preview is visible but controls do not respond:
 
-Then verify the public HTTPS URL, not just localhost. For controls, check that the state actually changes, such as `aria-checked`, `aria-pressed`, `aria-expanded`, route, dialog open state, or visible result text.
+1. Test the same control on localhost.
+2. Test the mobile URL itself, preferably with a mobile viewport.
+3. Check whether the issue is app code, preview runtime, Tailscale reachability, or ngrok warning/tunnel behavior.
 
-If the user says a mobile preview is visible but controls do not respond:
-
-1. Check whether the user is still on ngrok's warning page and needs to tap `Visit Site`.
-2. Test the same control on localhost to distinguish app code from tunnel/runtime behavior.
-3. Test the public ngrok URL itself, preferably with a mobile viewport.
-4. If localhost works but the dev-server tunnel does not, restart as a production preview and create a fresh tunnel.
-5. Report whether the issue was an app bug or a preview-runtime false negative.
-
-## ngrok EOF / IPv6 Workaround
-
-If ngrok starts its local web interface but the local tunnel API stays empty, inspect ngrok logs before reporting a public URL. A repeated log line like `failed to send authentication request: EOF` often means the agent can resolve and open TCP connections, but the network is breaking TLS or certificate-revocation checks.
-
-Check whether IPv6 is the bad path and IPv4 is healthy:
-
-```bash
-curl -Iv --max-time 10 https://api.ngrok.com/
-curl -4 -Iv --max-time 10 https://api.ngrok.com/
-curl -Iv --max-time 10 http://crl.ngrok-agent.com/ngrok.crl
-curl -4 -Iv --max-time 10 http://crl.ngrok-agent.com/ngrok.crl
-ngrok diagnose --region jp
-ngrok diagnose --ipv6 --region jp
-```
-
-If the IPv6/default checks fail with EOF, empty reply, or TLS errors while the IPv4 checks succeed, use a temporary IPv4-only workaround. On macOS Wi-Fi:
-
-```bash
-networksetup -setv6off Wi-Fi
-ngrok start <name>
-```
-
-Then verify the tunnel exists before giving the URL:
-
-```bash
-curl --silent http://127.0.0.1:4040/api/tunnels
-```
-
-Treat this as a temporary workaround. Tell the user that ngrok is working because Wi-Fi IPv6 is disabled, and remind them how to restore IPv6 after the mobile preview is done:
-
-```bash
-networksetup -setv6automatic Wi-Fi
-```
-
-If disabling IPv6 requires admin approval or password input that Codex cannot provide, ask the user to run the command locally and continue once they confirm.
+Read `references/mobile-interaction-validation.md` for the fuller checklist and framework-specific preview guidance.
 
 ## Reporting
 
-When the tunnel is ready, report:
+When the mobile URL is ready, report:
 
-- The public mobile URL.
-- The local target it forwards to, such as `localhost:5173`.
-- Any caveat that matters, such as tunnel lifetime, auth, HTTPS/callback URL changes, or server restart needs.
-- For Markdown previews, mention whether Markserv used a persistent install or temporary `bunx` fallback. If `bunx` was used, recommend `bun add -g markserv` for repeated use.
+- The primary mobile URL, preferably Tailscale for the user's own phone.
+- Whether the URL is tailnet-only or public.
+- The local target it reaches, such as `localhost:5173`.
+- Whether HTTPS is provided by Tailscale Serve, the app server, or ngrok fallback.
+- Any caveat that matters: phone Tailscale status, MagicDNS dependency, VPN-slot conflicts, tunnel lifetime, auth, callback URL changes, warning pages, or server restart needs.
+- For Markdown previews, whether Markserv used a persistent install or temporary `bunx` fallback.
+- Any cleanup command or foreground session id needed to stop the preview.
 
-Keep the desktop localhost URL as secondary diagnostic information only when useful.
+Keep desktop localhost URLs secondary and diagnostic only.

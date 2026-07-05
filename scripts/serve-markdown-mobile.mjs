@@ -1,22 +1,42 @@
 #!/usr/bin/env node
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createWriteStream, existsSync, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import {
+  commandPath,
+  deleteNgrokTunnel,
+  fetchWithTimeout,
+  getOrCreateNgrokTunnel,
+  getTailscaleInfo,
+  resetTailscaleServe,
+  startTailscaleServe,
+} from "./lib/mobile-access.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 
 function usage() {
   console.log(`Usage:
-  bun ${scriptPath} <markdown-file-or-directory> [--port 8642]
+  bun ${scriptPath} <markdown-file-or-directory> [--port 8642] [--access auto|tailscale|ngrok] [--https]
 
-Starts a Markserv Markdown preview, verifies local assets, and exposes it via
-an existing ngrok agent API at http://127.0.0.1:4040.`);
+Starts a Markserv Markdown preview for mobile reading.
+
+Default behavior:
+  1. Serve Markdown locally with Markserv.
+  2. Prefer a verified Tailscale URL for the user's own mobile device.
+  3. Fall back to ngrok when Tailscale is unavailable or cannot be verified.
+
+Options:
+  --port, -p <port>       Preferred local Markserv port. Defaults to 8642.
+  --access <mode>         auto, tailscale, or ngrok. Defaults to auto.
+  --tailscale             Alias for --access tailscale.
+  --ngrok                 Alias for --access ngrok.
+  --https                 Prefer Tailscale Serve HTTPS instead of direct HTTP.
+`);
 }
 
 function parseArgs(argv) {
@@ -27,7 +47,10 @@ function parseArgs(argv) {
   }
 
   let port = 8642;
+  let access = "auto";
+  let preferHttps = false;
   const positional = [];
+
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === "--port" || arg === "-p") {
@@ -37,6 +60,19 @@ function parseArgs(argv) {
       }
       port = Number(next);
       i += 1;
+    } else if (arg === "--access") {
+      const next = args[i + 1];
+      if (!["auto", "tailscale", "ngrok"].includes(next)) {
+        throw new Error("--access must be one of: auto, tailscale, ngrok");
+      }
+      access = next;
+      i += 1;
+    } else if (arg === "--tailscale") {
+      access = "tailscale";
+    } else if (arg === "--ngrok") {
+      access = "ngrok";
+    } else if (arg === "--https") {
+      preferHttps = true;
     } else {
       positional.push(arg);
     }
@@ -47,18 +83,7 @@ function parseArgs(argv) {
     throw new Error("Expected exactly one Markdown file or directory target");
   }
 
-  return { target: positional[0], port };
-}
-
-function commandPath(name) {
-  try {
-    return execFileSync("zsh", ["-lc", `command -v ${name}`], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-  } catch {
-    return "";
-  }
+  return { target: positional[0], port, access, preferHttps };
 }
 
 function gitRootFor(targetPath) {
@@ -124,21 +149,11 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function waitForUrl(url, description) {
+async function waitForHtmlUrl(url, description, headers = {}) {
   let lastError = "";
   for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
-      const response = await fetchWithTimeout(url, {}, 5000);
+      const response = await fetchWithTimeout(url, { headers }, 5000);
       const contentType = response.headers.get("content-type") || "";
       if (response.ok && contentType.includes("text/html")) {
         return { response, contentType };
@@ -193,57 +208,82 @@ async function verifyImage(pageUrl, html, headers = {}) {
   };
 }
 
-async function getNgrokTunnels() {
-  const response = await fetchWithTimeout("http://127.0.0.1:4040/api/tunnels", {}, 3000);
-  if (!response.ok) {
-    throw new Error(`ngrok API returned ${response.status}`);
+async function tryTailscaleDirect({ tailscale, port, pagePath }) {
+  const primaryUrl = `http://${tailscale.ip4}:${port}${pagePath}`;
+  const response = await waitForHtmlUrl(primaryUrl, "Tailscale Markdown page");
+  const html = await response.response.text();
+  const image = await verifyImage(primaryUrl, html);
+  const alternates = [];
+  if (tailscale.dnsName) {
+    alternates.push(`http://${tailscale.dnsName}:${port}${pagePath}`);
   }
-  return response.json();
+  return {
+    kind: "tailscale-direct",
+    url: primaryUrl,
+    accessLabel: "Tailscale direct (tailnet-only HTTP)",
+    alternates,
+    image,
+    caveat: "Phone must be connected to the same Tailscale tailnet.",
+  };
 }
 
-function tunnelMatchesPort(tunnel, port) {
-  const addr = tunnel?.config?.addr || "";
-  return addr === `${port}` || addr.endsWith(`:${port}`) || addr === `http://localhost:${port}`;
-}
+async function tryTailscaleServe({ tailscale, port, pagePath, onServeStarted = () => {} }) {
+  if (!tailscale.dnsName) {
+    throw new Error("Tailscale Serve HTTPS requires a MagicDNS name");
+  }
 
-async function getOrCreateTunnel(port) {
-  let tunnels;
+  let serveStarted = false;
   try {
-    tunnels = await getNgrokTunnels();
+    startTailscaleServe({ tailscale, localHost: "localhost", port });
+    serveStarted = true;
+    onServeStarted(tailscale.command);
   } catch (error) {
-    throw new Error(
-      `ngrok local API is unavailable. Start ngrok first, for example: ngrok http ${port}. Details: ${error.message}`,
-    );
+    throw error;
   }
 
-  const existing = (tunnels.tunnels || []).find((tunnel) => {
-    return tunnel.proto === "https" && tunnel.public_url && tunnelMatchesPort(tunnel, port);
-  });
-  if (existing) {
-    return { publicUrl: existing.public_url, created: false };
+  try {
+    const primaryUrl = `https://${tailscale.dnsName}${pagePath}`;
+    const response = await waitForHtmlUrl(primaryUrl, "Tailscale Serve Markdown page");
+    const html = await response.response.text();
+    const image = await verifyImage(primaryUrl, html);
+    return {
+      kind: "tailscale-serve",
+      url: primaryUrl,
+      accessLabel: "Tailscale Serve (tailnet-only HTTPS)",
+      alternates: [],
+      image,
+      createdServe: true,
+      caveat: "Phone must be connected to Tailscale; HTTPS uses this machine's MagicDNS name.",
+    };
+  } catch (error) {
+    if (serveStarted) {
+      try {
+        resetTailscaleServe(tailscale.command);
+        onServeStarted("");
+      } catch {
+        // Best-effort cleanup only; report the original verification error.
+      }
+    }
+    throw error;
   }
+}
 
-  const response = await fetchWithTimeout(
-    "http://127.0.0.1:4040/api/tunnels",
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name: `markserv-mobile-${port}-${Date.now()}`,
-        addr: `http://localhost:${port}`,
-        proto: "http",
-      }),
-    },
-    10000,
-  );
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Failed to create ngrok tunnel: ${response.status} ${text}`);
-  }
-
-  const tunnel = await response.json();
-  return { publicUrl: tunnel.public_url, uri: tunnel.uri, created: true };
+async function tryNgrok({ port, pagePath }) {
+  const tunnel = await getOrCreateNgrokTunnel(port, { namePrefix: "markserv-mobile" });
+  const primaryUrl = `${tunnel.publicUrl}${pagePath}`;
+  const headers = { "ngrok-skip-browser-warning": "1" };
+  const response = await waitForHtmlUrl(primaryUrl, "ngrok Markdown page", headers);
+  const html = await response.response.text();
+  const image = await verifyImage(primaryUrl, html, headers);
+  return {
+    kind: "ngrok",
+    url: primaryUrl,
+    accessLabel: "ngrok fallback (public HTTPS)",
+    alternates: [],
+    image,
+    createdTunnelUri: tunnel.created ? tunnel.uri : "",
+    caveat: "This URL is public and may show an ngrok browser warning on mobile.",
+  };
 }
 
 function startMarkserv({ serveRoot, port, markservPath, useBunx }) {
@@ -294,7 +334,7 @@ function stopProcess(child) {
 }
 
 async function main() {
-  const { target, port: requestedPort } = parseArgs(process.argv.slice(2));
+  const { target, port: requestedPort, access, preferHttps } = parseArgs(process.argv.slice(2));
   const resolved = resolveTarget(target);
   const port = await choosePort(requestedPort);
 
@@ -312,20 +352,28 @@ async function main() {
     useBunx,
   });
 
-  let publicUrl = "";
   let localHtml = "";
   let localImage = { status: "none", message: "" };
-  let publicImage = { status: "none", message: "" };
-  let createdTunnelUri = "";
+  let mobile = null;
+  let fallbackReason = "";
   let shuttingDown = false;
+  let createdServeCommand = "";
 
   async function cleanup() {
     stopProcess(markserv.child);
-    if (createdTunnelUri) {
+    if (mobile?.createdTunnelUri) {
       try {
-        await fetchWithTimeout(`http://127.0.0.1:4040${createdTunnelUri}`, { method: "DELETE" }, 3000);
+        await deleteNgrokTunnel(mobile.createdTunnelUri);
       } catch {
         // Best-effort cleanup only; ngrok tunnels can also be removed by restarting ngrok.
+      }
+    }
+    const serveCommand = mobile?.createdServe ? createdServeCommand || getTailscaleInfo().command : createdServeCommand;
+    if (serveCommand) {
+      try {
+        resetTailscaleServe(serveCommand);
+      } catch {
+        // Best-effort cleanup only; the user can run "tailscale serve reset" manually.
       }
     }
   }
@@ -346,42 +394,76 @@ async function main() {
 
   try {
     const localPageUrl = `http://127.0.0.1:${port}${resolved.pagePath}`;
-    await waitForUrl(localPageUrl, "local Markserv Markdown page");
+    await waitForHtmlUrl(localPageUrl, "local Markserv Markdown page");
     const localResponse = await fetchWithTimeout(localPageUrl, {}, 10000);
     localHtml = await localResponse.text();
     localImage = await verifyImage(localPageUrl, localHtml);
 
-    const tunnel = await getOrCreateTunnel(port);
-    if (tunnel.created) {
-      createdTunnelUri = tunnel.uri;
+    if (access !== "ngrok") {
+      const tailscale = getTailscaleInfo();
+      if (tailscale.available) {
+        try {
+          mobile = preferHttps
+            ? await tryTailscaleServe({
+                tailscale,
+                port,
+                pagePath: resolved.pagePath,
+                onServeStarted: (command) => {
+                  createdServeCommand = command;
+                },
+              })
+            : await tryTailscaleDirect({ tailscale, port, pagePath: resolved.pagePath });
+        } catch (error) {
+          fallbackReason = `Tailscale ${preferHttps ? "Serve" : "direct"} failed: ${error.message}`;
+          if (!preferHttps) {
+            try {
+              mobile = await tryTailscaleServe({
+                tailscale,
+                port,
+                pagePath: resolved.pagePath,
+                onServeStarted: (command) => {
+                  createdServeCommand = command;
+                },
+              });
+              fallbackReason = "Direct Tailscale URL failed, so Tailscale Serve HTTPS was used.";
+            } catch (serveError) {
+              fallbackReason += `; Tailscale Serve fallback failed: ${serveError.message}`;
+            }
+          }
+        }
+      } else {
+        fallbackReason = tailscale.reason;
+      }
     }
-    publicUrl = `${tunnel.publicUrl}${resolved.pagePath}`;
 
-    const publicResponse = await fetchWithTimeout(
-      publicUrl,
-      { headers: { "ngrok-skip-browser-warning": "1" } },
-      20000,
-    );
-    if (!publicResponse.ok) {
-      throw new Error(`Public Markdown page returned ${publicResponse.status}`);
+    if (!mobile) {
+      if (access === "tailscale") {
+        throw new Error(fallbackReason || "Tailscale access was required but unavailable");
+      }
+      mobile = await tryNgrok({ port, pagePath: resolved.pagePath });
     }
-    const publicHtml = await publicResponse.text();
-    publicImage = await verifyImage(publicUrl, publicHtml, {
-      "ngrok-skip-browser-warning": "1",
-    });
 
     console.log("");
     console.log("Markdown mobile preview is ready.");
-    console.log(`Public URL: ${publicUrl}`);
+    console.log(`Primary URL: ${mobile.url}`);
+    console.log(`Access: ${mobile.accessLabel}`);
+    for (const alternate of mobile.alternates || []) {
+      console.log(`Alternate URL: ${alternate}`);
+    }
     console.log(`Local target: http://localhost:${port}`);
     console.log(`Serve root: ${resolved.serveRoot}`);
     console.log(`Target: ${resolved.targetPath}`);
     console.log(`Markserv: ${useBunx ? "temporary bunx fallback" : markservPath}`);
     console.log(`Local image check: ${localImage.message}`);
-    console.log(`Public image check: ${publicImage.message}`);
+    console.log(`Mobile image check: ${mobile.image.message}`);
     console.log(`Log: ${markserv.logPath}`);
-    console.log("");
-    console.log("If ngrok shows a browser warning on mobile, tap Visit Site.");
+    if (fallbackReason && mobile.kind === "ngrok") {
+      console.log(`Fallback reason: ${fallbackReason}`);
+    }
+    console.log(`Caveat: ${mobile.caveat}`);
+    if (mobile.kind === "ngrok") {
+      console.log("If ngrok shows a browser warning on mobile, tap Visit Site.");
+    }
     if (useBunx) {
       console.log("For repeated use, install Markserv persistently:");
       console.log("  bun add -g markserv");
