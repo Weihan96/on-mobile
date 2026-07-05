@@ -139,6 +139,7 @@ Read `references/mobile-interaction-validation.md` for the fuller checklist and 
 When the mobile URL is ready, report:
 
 - The primary mobile URL, preferably Tailscale for the user's own phone.
+- If a URL is formatted as a Markdown link, the link target must be the same complete openable URL shown in the label. Never use `/`, `#`, an empty target, or a local file path as the target for a URL-looking label.
 - Whether the URL is tailnet-only or public.
 - The local target it reaches, such as `localhost:5173`.
 - Whether HTTPS is provided by Tailscale Serve, the app server, or ngrok fallback.
