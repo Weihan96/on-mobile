@@ -122,9 +122,16 @@ Do not use Tailscale Funnel unless the user explicitly needs a public internet U
 
 ## Mobile Interaction Validation
 
-When the user needs to validate taps, forms, selects, dialogs, drag handles, auth callbacks, or other mobile behavior, verify the exact URL the phone will open.
+When the user needs to preview or validate an app on mobile, build it first, serve the production build, and verify the exact URL the phone will open. This includes visual review, taps, forms, selects, dialogs, drag handles, auth callbacks, websocket behavior, recipe viewers, menus, and any other client-side interaction.
 
-Use dev-server previews for quick visual checks only. Prefer a production preview when the project supports it and the interaction result matters.
+For Next.js apps, build and start the production server before reporting the mobile URL:
+
+```bash
+bun run build
+bun run start -- --port <port> --hostname 0.0.0.0
+```
+
+Development runtimes add HMR, overlays, websocket clients, and bundler behavior that can differ through Tailscale, Tailscale Serve, or ngrok. Do not use a development server as the reported mobile preview for interactive app checks; it can render the page while interaction state fails to update.
 
 If a mobile preview is visible but controls do not respond:
 
