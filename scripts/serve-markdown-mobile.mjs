@@ -1,29 +1,19 @@
-#!/usr/bin/env node
-
+#!/usr/bin/env bun
 import { execFileSync, spawn } from "node:child_process";
-import { createWriteStream, existsSync, statSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { existsSync, statSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  commandPath,
-  deleteNgrokTunnel,
-  fetchWithTimeout,
-  getOrCreateNgrokTunnel,
-  getTailscaleInfo,
-  resetTailscaleServe,
-  startTailscaleServe,
-} from "./lib/mobile-access.mjs";
-
+import { commandPath, fetchWithTimeout } from "./lib/mobile-access.mjs";
+import { readService } from "./mobile-service.mjs";
 const scriptPath = fileURLToPath(import.meta.url);
-
+const manager = path.join(path.dirname(scriptPath), "mobile-service.mjs");
+const urlHelper = path.join(path.dirname(scriptPath), "mobile-url-for-port.mjs");
 function usage() {
   console.log(`Usage:
   bun ${scriptPath} <markdown-file-or-directory> [--port 8642] [--access auto|tailscale|ngrok] [--https]
 
-Starts a Markserv Markdown preview for mobile reading.
+Starts a launchd-managed Markserv preview, retained until explicit completion or seven days.
 
 Default behavior:
   1. Serve Markdown locally with Markserv.
@@ -208,279 +198,66 @@ async function verifyImage(pageUrl, html, headers = {}) {
   };
 }
 
-async function tryTailscaleDirect({ tailscale, port, pagePath }) {
-  const primaryUrl = `http://${tailscale.ip4}:${port}${pagePath}`;
-  const response = await waitForHtmlUrl(primaryUrl, "Tailscale Markdown page");
-  const html = await response.response.text();
-  const image = await verifyImage(primaryUrl, html);
-  const alternates = [];
-  if (tailscale.dnsName) {
-    alternates.push(`http://${tailscale.dnsName}:${port}${pagePath}`);
-  }
-  return {
-    kind: "tailscale-direct",
-    url: primaryUrl,
-    accessLabel: "Tailscale direct (tailnet-only HTTP)",
-    alternates,
-    image,
-    caveat: "Phone must be connected to the same Tailscale tailnet.",
-  };
-}
-
-async function tryTailscaleServe({ tailscale, port, pagePath, onServeStarted = () => {} }) {
-  if (!tailscale.dnsName) {
-    throw new Error("Tailscale Serve HTTPS requires a MagicDNS name");
-  }
-
-  let serveStarted = false;
-  try {
-    startTailscaleServe({ tailscale, localHost: "localhost", port });
-    serveStarted = true;
-    onServeStarted(tailscale.command);
-  } catch (error) {
-    throw error;
-  }
-
-  try {
-    const primaryUrl = `https://${tailscale.dnsName}${pagePath}`;
-    const response = await waitForHtmlUrl(primaryUrl, "Tailscale Serve Markdown page");
-    const html = await response.response.text();
-    const image = await verifyImage(primaryUrl, html);
-    return {
-      kind: "tailscale-serve",
-      url: primaryUrl,
-      accessLabel: "Tailscale Serve (tailnet-only HTTPS)",
-      alternates: [],
-      image,
-      createdServe: true,
-      caveat: "Phone must be connected to Tailscale; HTTPS uses this machine's MagicDNS name.",
-    };
-  } catch (error) {
-    if (serveStarted) {
-      try {
-        resetTailscaleServe(tailscale.command);
-        onServeStarted("");
-      } catch {
-        // Best-effort cleanup only; report the original verification error.
-      }
-    }
-    throw error;
-  }
-}
-
-async function tryNgrok({ port, pagePath }) {
-  const tunnel = await getOrCreateNgrokTunnel(port, { namePrefix: "markserv-mobile" });
-  const primaryUrl = `${tunnel.publicUrl}${pagePath}`;
-  const headers = { "ngrok-skip-browser-warning": "1" };
-  const response = await waitForHtmlUrl(primaryUrl, "ngrok Markdown page", headers);
-  const html = await response.response.text();
-  const image = await verifyImage(primaryUrl, html, headers);
-  return {
-    kind: "ngrok",
-    url: primaryUrl,
-    accessLabel: "ngrok fallback (public HTTPS)",
-    alternates: [],
-    image,
-    createdTunnelUri: tunnel.created ? tunnel.uri : "",
-    caveat: "This URL is public and may show an ngrok browser warning on mobile.",
-  };
-}
-
-function startMarkserv({ serveRoot, port, markservPath, useBunx }) {
-  const logDir = path.join(os.tmpdir(), "codex-on-mobile-markserv");
-  const logPath = path.join(logDir, `markserv-${port}.log`);
-
-  return mkdir(logDir, { recursive: true }).then(() => {
-    const args = [
-      useBunx ? "markserv" : ".",
-      ...(useBunx ? ["."] : []),
-      "-p",
-      String(port),
-      "-a",
-      "0.0.0.0",
-      "--browser",
-      "false",
-      "--livereloadport",
-      "false",
-    ];
-
-    const child = spawn(useBunx ? "bunx" : markservPath, args, {
-      cwd: serveRoot,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
-    });
-
-    const log = createWriteStream(logPath, { flags: "a" });
-    child.stdout.pipe(log);
-    child.stderr.pipe(log);
-
-    let exited = false;
-    child.once("error", (error) => {
-      exited = true;
-      log.write(`\n[serve-markdown-mobile] failed to start markserv: ${error.message}\n`);
-    });
-    child.once("exit", (code, signal) => {
-      exited = true;
-      log.write(`\n[serve-markdown-mobile] markserv exited code=${code} signal=${signal}\n`);
-    });
-
-    return { child, logPath, didExit: () => exited };
-  });
-}
-
-function stopProcess(child) {
-  if (!child || child.killed) return;
-  child.kill("SIGTERM");
-}
 
 async function main() {
-  const { target, port: requestedPort, access, preferHttps } = parseArgs(process.argv.slice(2));
-  const resolved = resolveTarget(target);
-  const port = await choosePort(requestedPort);
-
-  const markservPath = commandPath("markserv");
-  const bunPath = commandPath("bun");
-  const useBunx = !markservPath;
-  if (useBunx && !bunPath) {
-    throw new Error("markserv is not installed and bun is unavailable for bunx fallback");
-  }
-
-  const markserv = await startMarkserv({
-    serveRoot: resolved.serveRoot,
-    port,
-    markservPath,
-    useBunx,
-  });
-
-  let localHtml = "";
-  let localImage = { status: "none", message: "" };
-  let mobile = null;
-  let fallbackReason = "";
-  let shuttingDown = false;
-  let createdServeCommand = "";
-
-  async function cleanup() {
-    stopProcess(markserv.child);
-    if (mobile?.createdTunnelUri) {
-      try {
-        await deleteNgrokTunnel(mobile.createdTunnelUri);
-      } catch {
-        // Best-effort cleanup only; ngrok tunnels can also be removed by restarting ngrok.
+  const options = parseArgs(process.argv.slice(2));
+  const resolved = resolveTarget(options.target);
+  const markserv = commandPath("markserv");
+  if (!markserv) throw new Error("Durable previews require installed Markserv. Install with: bun add -g markserv");
+  const id = process.env.ON_MOBILE_SERVICE_ID;
+  if (!id) {
+    const port = await choosePort(options.port);
+    const args = [scriptPath, resolved.targetPath, "--port", String(port), "--access", options.access];
+    if (options.preferHttps) args.push("--https");
+    const service = JSON.parse(execFileSync(process.execPath,
+      [manager, "start", "--cwd", resolved.serveRoot, "--port", String(port), "--", process.execPath, ...args],
+      { encoding: "utf8", timeout: 60000 }));
+    for (let attempt = 0; attempt < 90; attempt++) {
+      const current = await readService(service.id);
+      const preview = path.join(current.directory, "preview.json");
+      if (existsSync(preview) && current.status === "running") {
+        const result = JSON.parse(readFileSync(preview, "utf8"));
+        if (result.helperPid !== current.childPid || result.workerPid !== current.workerPid) { await sleep(1000); continue; }
+        // The launching command can exit now; launchd owns the entire preview.
+        console.log(JSON.stringify(result, null, 2));
+        return;
       }
+      await sleep(1000);
     }
-    const serveCommand = mobile?.createdServe ? createdServeCommand || getTailscaleInfo().command : createdServeCommand;
-    if (serveCommand) {
-      try {
-        resetTailscaleServe(serveCommand);
-      } catch {
-        // Best-effort cleanup only; the user can run "tailscale serve reset" manually.
-      }
-    }
+    throw new Error(`Preview not ready; inspect mobile-service.mjs status ${service.id}. It remains managed until stopped/expired.`);
   }
-
-  async function shutdown(exitCode) {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    await cleanup();
-    process.exit(exitCode);
-  }
-
-  process.once("SIGINT", () => {
-    void shutdown(130);
+  const service = await readService(id);
+  if (service.port !== options.port) throw new Error("Managed preview port does not match its receipt");
+  const child = spawn(process.execPath, [markserv, ".", "-p", String(options.port), "-a", "0.0.0.0", "--browser", "false", "--livereloadport", "false"],
+    { cwd: resolved.serveRoot, stdio: "inherit", env: process.env });
+  let childEnded = false;
+  const ended = new Promise((resolve, reject) => {
+    child.once("error", error => { childEnded = true; reject(error); });
+    child.once("exit", (code, signal) => { childEnded = true; resolve({ code, signal }); });
   });
-  process.once("SIGTERM", () => {
-    void shutdown(143);
-  });
-
+  // Observe early failures while readiness probes run.
+  ended.catch(() => {});
+  const guard = promise => Promise.race([promise, ended.then(() => { throw new Error("Markserv exited during readiness"); })]);
+  process.once("SIGTERM", () => child.kill("SIGTERM"));
+  process.once("SIGINT", () => child.kill("SIGTERM"));
   try {
-    const localPageUrl = `http://127.0.0.1:${port}${resolved.pagePath}`;
-    await waitForHtmlUrl(localPageUrl, "local Markserv Markdown page");
-    const localResponse = await fetchWithTimeout(localPageUrl, {}, 10000);
-    localHtml = await localResponse.text();
-    localImage = await verifyImage(localPageUrl, localHtml);
-
-    if (access !== "ngrok") {
-      const tailscale = getTailscaleInfo();
-      if (tailscale.available) {
-        try {
-          mobile = preferHttps
-            ? await tryTailscaleServe({
-                tailscale,
-                port,
-                pagePath: resolved.pagePath,
-                onServeStarted: (command) => {
-                  createdServeCommand = command;
-                },
-              })
-            : await tryTailscaleDirect({ tailscale, port, pagePath: resolved.pagePath });
-        } catch (error) {
-          fallbackReason = `Tailscale ${preferHttps ? "Serve" : "direct"} failed: ${error.message}`;
-          if (!preferHttps) {
-            try {
-              mobile = await tryTailscaleServe({
-                tailscale,
-                port,
-                pagePath: resolved.pagePath,
-                onServeStarted: (command) => {
-                  createdServeCommand = command;
-                },
-              });
-              fallbackReason = "Direct Tailscale URL failed, so Tailscale Serve HTTPS was used.";
-            } catch (serveError) {
-              fallbackReason += `; Tailscale Serve fallback failed: ${serveError.message}`;
-            }
-          }
-        }
-      } else {
-        fallbackReason = tailscale.reason;
-      }
-    }
-
-    if (!mobile) {
-      if (access === "tailscale") {
-        throw new Error(fallbackReason || "Tailscale access was required but unavailable");
-      }
-      mobile = await tryNgrok({ port, pagePath: resolved.pagePath });
-    }
-
-    console.log("");
-    console.log("Markdown mobile preview is ready.");
-    console.log(`Primary URL: ${mobile.url}`);
-    console.log(`Access: ${mobile.accessLabel}`);
-    for (const alternate of mobile.alternates || []) {
-      console.log(`Alternate URL: ${alternate}`);
-    }
-    console.log(`Local target: http://localhost:${port}`);
-    console.log(`Serve root: ${resolved.serveRoot}`);
-    console.log(`Target: ${resolved.targetPath}`);
-    console.log(`Markserv: ${useBunx ? "temporary bunx fallback" : markservPath}`);
-    console.log(`Local image check: ${localImage.message}`);
-    console.log(`Mobile image check: ${mobile.image.message}`);
-    console.log(`Log: ${markserv.logPath}`);
-    if (fallbackReason && mobile.kind === "ngrok") {
-      console.log(`Fallback reason: ${fallbackReason}`);
-    }
-    console.log(`Caveat: ${mobile.caveat}`);
-    if (mobile.kind === "ngrok") {
-      console.log("If ngrok shows a browser warning on mobile, tap Visit Site.");
-    }
-    if (useBunx) {
-      console.log("For repeated use, install Markserv persistently:");
-      console.log("  bun add -g markserv");
-    }
-    console.log("");
-    console.log("Keep this process running while you use the preview. Press Ctrl+C to stop.");
-
-    await new Promise((resolve) => {
-      markserv.child.once("exit", resolve);
-    });
-  } catch (error) {
-    await cleanup();
-    throw error;
-  }
+    const localUrl = `http://127.0.0.1:${options.port}${resolved.pagePath}`;
+    const local = await guard(waitForHtmlUrl(localUrl, "local Markdown"));
+    const localImage = await guard(verifyImage(localUrl, await local.response.text()));
+    const args = [urlHelper, String(options.port), "--service", id, "--path", resolved.pagePath, "--access", options.access, "--json"];
+    if (options.preferHttps) args.push("--https");
+    const result = JSON.parse(execFileSync(process.execPath, args, { encoding: "utf8", timeout: 75000 }));
+    const mobile = await guard(waitForHtmlUrl(result.primaryUrl, "mobile Markdown",
+      result.access === "ngrok" ? { "ngrok-skip-browser-warning": "1" } : {}));
+    const mobileImage = await verifyImage(result.primaryUrl, await mobile.response.text(),
+      result.access === "ngrok" ? { "ngrok-skip-browser-warning": "1" } : {});
+    if (childEnded) throw new Error("Markserv exited before publication");
+    const receipt = path.join(service.directory, "preview.json");
+    const temporary = `${receipt}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify({ ...result, workerPid: service.workerPid, helperPid: process.pid, localImage, mobileImage, serveRoot: resolved.serveRoot, markserv }, null, 2));
+    renameSync(temporary, receipt);
+    const exit = await ended;
+    throw new Error(`Markserv exited: ${JSON.stringify(exit)}`);
+  } finally { child.kill("SIGTERM"); }
 }
-
-main().catch((error) => {
-  console.error(`Error: ${error.message}`);
-  process.exit(1);
-});
+main().catch(error => { console.error(`Error: ${error.message}`); process.exitCode = 1; });

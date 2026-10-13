@@ -14,7 +14,7 @@ The helper:
 
 1. Resolves the Markdown target.
 2. Serves the git repository root when the target is inside a git repo; otherwise serves the Markdown file's parent directory or the requested directory.
-3. Starts Markserv bound to `0.0.0.0`.
+3. Starts a launchd-managed Markserv bound to `0.0.0.0` with a fixed seven-day lifetime.
 4. Verifies the local rendered Markdown URL returns HTML.
 5. Verifies at least one local relative image when the rendered HTML contains images.
 6. Prefers a verified Tailscale URL when Tailscale is running.
@@ -22,40 +22,15 @@ The helper:
 8. Falls back to ngrok only when Tailscale is unavailable or `--access ngrok` is requested.
 9. Verifies the final mobile URL and reports whether it is tailnet-only or public.
 
-## Markserv Policy
+## Markserv and Process Lifetime
 
-- First use a stable installed command discovered with `command -v markserv`.
-- If no stable `markserv` command exists, use `bunx markserv` only as a temporary fallback for the current preview.
-- When the fallback is used, tell the user that repeated use should install Markserv persistently:
+Use a stable installed `markserv` executable. If missing, request/obtain the usual installation authorization and install with `bun add -g markserv`; verify `markserv --version`. Do not use a temporary `bunx` cache as a week-long daemon entrypoint.
 
-```bash
-bun add -g markserv
-```
+The helper launches itself and Markserv through `mobile-service.mjs` under macOS launchd. It returns after validating the page/images; no foreground tool session is required. Keep the returned service until the user explicitly confirms completion or seven days from creation. Probes, playback, inactivity, task completion and restarts do not count as completion or renew expiry.
 
-- Do not rely on or document Bun's temporary `bunx-*` cache paths as stable Markserv entrypoints.
-- Do not automatically run a global install unless the user explicitly asks for persistent installation.
+After user confirmation, run `mobile-service.mjs stop <service-id>`; verify `status <service-id>` reaches `closed`. Failed cleanup remains recorded and retryable. Only this service and its owned route are removed; Markdown, images, videos and other tasks' services remain. Never use global `tailscale serve reset` or kill a shared ngrok agent for cleanup.
 
-## Process Lifetime
-
-For previews that need to stay open while the user checks a mobile link, keep the server process attached to a live foreground command session.
-
-Good:
-
-```bash
-bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs ./README.md --access tailscale
-```
-
-Let the command continue running and keep the returned session id. Stop it with `Ctrl+C` after the user is done.
-
-Avoid:
-
-```bash
-nohup bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs ./README.md > /tmp/mobile-preview.log 2>&1 &
-```
-
-Do not rely on `nohup ... &`, shell background jobs, or one-shot detached commands from Codex tool calls for live previews; those processes may be reclaimed after the parent command exits, making the mobile URL stop responding even when Markserv itself is healthy.
-
-If a durable background preview is needed, use or implement an explicit daemon mode with its own lifecycle, pid file, logs, health check, and cleanup command instead of improvising with shell backgrounding.
+The Mac must remain awake, connected and logged in for local access. On wake/login after expiry, the worker cleans up before starting the origin. On unsupported platforms use an equivalent supervised host with the same lifetime, or report the missing capability. Do not fall back to foreground sessions or `nohup ... &`.
 
 ## Relative Images
 

@@ -1,20 +1,17 @@
-#!/usr/bin/env node
-
+#!/usr/bin/env bun
+import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync, existsSync, renameSync, rmSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  formatProbe,
-  getOrCreateNgrokTunnel,
-  getTailscaleInfo,
-  probeUrl,
-  resetTailscaleServe,
-  startTailscaleServe,
-} from "./lib/mobile-access.mjs";
-
+import { createManager, readService, registerCleanup, withServiceResourceLock } from "./mobile-service.mjs";
+import { getTailscaleInfo, probeUrl, commandPath } from "./lib/mobile-access.mjs";
+import { isOwnedNgrokAgent, validateNgrokReceipt } from "./mobile-ngrok.mjs";
 const scriptPath = fileURLToPath(import.meta.url);
-
+const ngrokWrapper = path.join(path.dirname(scriptPath), "mobile-ngrok.mjs");
+const manager = () => createManager({ stateRoot: process.env.ON_MOBILE_STATE_ROOT, agentsRoot: process.env.ON_MOBILE_AGENTS_ROOT });
 function usage() {
   console.log(`Usage:
-  bun ${scriptPath} <port> [--path /] [--access auto|tailscale|ngrok] [--https] [--json]
+  bun ${scriptPath} <port> [--path /] [--access auto|tailscale|ngrok] [--https] [--json] --service <id>
 
 Builds and verifies a phone-accessible URL for a local server that is already
 running on the development machine.
@@ -25,6 +22,7 @@ Default behavior:
   3. Fall back to ngrok when Tailscale is unavailable or cannot be verified.
 
 Options:
+  --service <id>         Managed origin service from mobile-service.mjs. Required.
   --path <path>           Path to append to the URL. Defaults to /.
   --access <mode>         auto, tailscale, or ngrok. Defaults to auto.
   --tailscale             Alias for --access tailscale.
@@ -43,6 +41,7 @@ function parseArgs(argv) {
     process.exit(0);
   }
 
+  let serviceId = process.env.ON_MOBILE_SERVICE_ID || "";
   let access = "auto";
   let urlPath = "/";
   let preferHttps = false;
@@ -53,7 +52,11 @@ function parseArgs(argv) {
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (arg === "--path") {
+    if (arg === "--service") {
+      const value = args[++i];
+      if (!value) throw new Error(`${arg} requires an id`);
+      serviceId = value;
+    } else if (arg === "--path") {
       const next = args[i + 1];
       if (!next) throw new Error("--path requires a value");
       urlPath = normalizePath(next);
@@ -96,6 +99,7 @@ function parseArgs(argv) {
   }
 
   return {
+    serviceId,
     port: Number(positional[0]),
     path: urlPath,
     access,
@@ -114,181 +118,196 @@ function normalizePath(value) {
   return value.startsWith("/") ? value : `/${value}`;
 }
 
-async function tryTailscaleDirect({ tailscale, port, path, timeoutMs }) {
-  const primaryUrl = `http://${tailscale.ip4}:${port}${path}`;
-  const probe = await probeUrl(primaryUrl, timeoutMs);
-  if (!probe.ok) {
-    throw new Error(`Tailscale URL probe failed: ${probe.error || probe.status}`);
-  }
 
-  const alternates = [];
-  if (tailscale.dnsName) {
-    alternates.push(`http://${tailscale.dnsName}:${port}${path}`);
-  }
-
-  return {
-    kind: "tailscale-direct",
-    visibility: "tailnet-only",
-    primaryUrl,
-    alternates,
-    probe,
-    cleanupCommand: "",
-    caveat: "Phone must be connected to the same Tailscale tailnet.",
-  };
+function routeFile(service) { return path.join(service.directory, "route.json"); }
+function loadRoute(service) {
+  return existsSync(routeFile(service)) ? JSON.parse(readFileSync(routeFile(service), "utf8")) : null;
 }
+export function saveRoute(service, route) {
+  const destination = routeFile(service), temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+  try { writeFileSync(temporary, JSON.stringify(route, null, 2), { flag: "wx", mode: 0o600 }); renameSync(temporary, destination); }
+  finally { rmSync(temporary, { force: true }); }
+}
+function serveConfig(command) {
+  return JSON.parse(execFileSync(command, ["serve", "status", "--json"], { encoding: "utf8", timeout: 10000, env: { ...process.env, TERM: "xterm-256color" } }));
+}
+function serveHandler(config, route) { return config.Web?.[route.host]?.Handlers; }
 
-async function tryTailscaleServe({ tailscale, port, path, localHost, timeoutMs }) {
-  if (!tailscale.dnsName) {
-    throw new Error("Tailscale Serve HTTPS requires a MagicDNS name");
-  }
-
-  startTailscaleServe({ tailscale, localHost, port });
-
-  const primaryUrl = `https://${tailscale.dnsName}${path}`;
-  const probe = await probeUrl(primaryUrl, timeoutMs);
-  if (!probe.ok) {
-    try {
-      resetTailscaleServe(tailscale.command);
-    } catch {
-      // Best-effort cleanup only; report the original verification error.
+// The receipt names one endpoint. Never reset the machine-wide Serve config.
+async function cleanupRouteUnlocked(service) {
+  const route = loadRoute(service);
+  if (!route || route.removed) return;
+  if (route.kind === "tailscale-serve") {
+    const config = serveConfig(route.command);
+    const handlers = serveHandler(config, route);
+    if (handlers) {
+      if (JSON.stringify(handlers) !== JSON.stringify({ "/": { Proxy: route.target } })) {
+        throw new Error("Serve endpoint changed ownership; retained for inspection");
+      }
+      execFileSync(route.command, ["serve", `--https=${route.httpsPort}`, "off"], { timeout: 15000, env: { ...process.env, TERM: "xterm-256color" } });
+    } else if (config.TCP?.[route.httpsPort]) {
+      throw new Error("Serve port was repurposed; refusing to remove it");
     }
-    throw new Error(`Tailscale Serve URL probe failed: ${probe.error || probe.status}`);
+  } else if (route.kind === "ngrok") {
+    // A missing bootstrap response can leave agentId unset. Recover only agents
+    // whose immutable argv explicitly names this exact origin and port.
+    const agents = route.agentId ? [await readService(route.agentId)] : (await manager().list()).filter(a => isOwnedNgrokAgent(a, service.id, service.port));
+    for (const agent of agents) {
+      if (!isOwnedNgrokAgent(agent, service.id, service.port)) throw new Error("ngrok agent ownership changed; refusing cleanup");
+      await manager().stop(agent.id);
+      let closed = false;
+      for (let i = 0; i < 12; i++) {
+        if ((await readService(agent.id)).status === "closed") { closed = true; break; }
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      if (!closed) throw new Error("Owned ngrok agent cleanup still pending");
+    }
   }
-
-  return {
-    kind: "tailscale-serve",
-    visibility: "tailnet-only",
-    primaryUrl,
-    alternates: [],
-    probe,
-    cleanupCommand: `${JSON.stringify(tailscale.command)} serve reset`,
-    caveat: "Tailscale Serve config was created and persists until reset.",
-  };
+  saveRoute(service, { ...route, removed: true });
 }
 
-async function tryNgrok({ port, path, timeoutMs }) {
-  const tunnel = await getOrCreateNgrokTunnel(port, { namePrefix: "mobile-url" });
-  const primaryUrl = `${tunnel.publicUrl}${path}`;
-  const probe = await probeUrl(primaryUrl, timeoutMs);
-  if (!probe.ok) {
-    throw new Error(`ngrok URL probe failed: ${probe.error || probe.status}`);
+export async function cleanupRoute(service) {
+  return withServiceResourceLock(service.id, () => cleanupRouteUnlocked(service));
+}
+function assertListenerOwned(service, port) {
+  const raw = execFileSync("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], { encoding: "utf8", timeout: 5000 });
+  const pids = [...raw.matchAll(/^p(\d+)$/gm)].map(m => Number(m[1]));
+  if (!pids.length) throw new Error("No listener for managed service");
+  for (let pid of pids) {
+    let owned = false;
+    for (let depth = 0; pid > 1 && depth < 64; depth++) {
+      if (pid === service.childPid) { owned = true; break; }
+      pid = Number(execFileSync("/bin/ps", ["-p", String(pid), "-o", "ppid="], { encoding: "utf8", timeout: 3000 }).trim());
+    }
+    if (!owned) throw new Error("Port listener is not the managed child or its descendant");
   }
-
-  return {
-    kind: "ngrok",
-    visibility: "public",
-    primaryUrl,
-    alternates: [],
-    probe,
-    cleanupCommand: tunnel.created && tunnel.uri ? `curl -X DELETE http://127.0.0.1:4040${tunnel.uri}` : "",
-    caveat: "This URL is public and may show an ngrok browser warning on mobile.",
-  };
+}
+async function activeService(id, port) {
+  if (!id) throw new Error("A durable origin is required. Start it with mobile-service.mjs, then pass --service ID.");
+  const service = await readService(id);
+  if (service.port !== port || service.status !== "running" || Date.now() >= Date.parse(service.expiresAt)) {
+    throw new Error("Service is not running, expired, or does not own this port");
+  }
+  assertListenerOwned(service, port);
+  return service;
 }
 
-function printHuman(result) {
-  console.log("");
-  console.log("Mobile URL is ready.");
-  console.log(`Primary URL: ${result.primaryUrl}`);
-  console.log(`Access: ${result.kind}`);
-  console.log(`Visibility: ${result.visibility}`);
-  for (const alternate of result.alternates || []) {
-    console.log(`Alternate URL: ${alternate}`);
+async function createServeUnlocked(service, tailscale, port) {
+  await activeService(service.id, port);
+  const previous = loadRoute(service);
+  if (previous && !previous.removed) {
+    if (previous.kind !== "tailscale-serve") throw new Error("Service already owns another route; do not replace a delivered URL");
+    const handlers = serveHandler(serveConfig(previous.command), previous);
+    if (JSON.stringify(handlers) !== JSON.stringify({ "/": { Proxy: previous.target } })) {
+      throw new Error("Existing Serve route is missing or changed; cannot silently change the delivered URL");
+    }
+    return previous;
   }
-  console.log(`Local target: ${result.localTarget}`);
-  console.log(
-    `Local probe: ${formatProbe(result.localProbe)}${result.localProbe.ok ? "" : " (warning)"}`,
-  );
-  console.log(`Mobile probe: ${formatProbe(result.mobileProbe)}`);
-  if (result.fallbackReason) {
-    console.log(`Fallback reason: ${result.fallbackReason}`);
+  return withServiceResourceLock(service.id, async () => {
+    const config = serveConfig(tailscale.command);
+    const used = new Set(Object.keys(config.TCP || {}).map(Number));
+    let httpsPort = 18443;
+    while (used.has(httpsPort) || httpsPort === port) httpsPort++;
+    if (httpsPort > 65535) throw new Error("No free Serve port");
+    const route = { kind: "tailscale-serve", command: tailscale.command, httpsPort,
+      host: `${tailscale.dnsName}:${httpsPort}`, target: `http://127.0.0.1:${port}`,
+      baseUrl: `https://${tailscale.dnsName}:${httpsPort}` };
+    // Persist cleanup intent before creating the resource, including partial failures.
+    saveRoute(service, route);
+    await registerCleanup(service.id, [process.execPath, scriptPath, "cleanup", "--service", service.id]);
+    await activeService(service.id, port);
+    execFileSync(tailscale.command, ["serve", "--bg", "--yes", `--https=${httpsPort}`, route.target], { timeout: 20000, env: { ...process.env, TERM: "xterm-256color" } });
+    return route;
+  }, true);
+}
+
+async function ngrokRouteUnlocked(service, options) {
+  await activeService(service.id, options.port);
+  const saved = loadRoute(service);
+  if (saved && !saved.removed && saved.kind !== "ngrok") throw new Error("Cannot replace a delivered service route");
+  let agentId = saved && !saved.removed ? saved.agentId : null;
+  if (!agentId) {
+    const executable = commandPath("ngrok");
+    if (!path.isAbsolute(executable)) throw new Error("ngrok executable not found");
+    saveRoute(service, { kind: "ngrok", ownedAgent: true, agentId: null });
+    await registerCleanup(service.id, [process.execPath, scriptPath, "cleanup", "--service", service.id]);
+    // Reconcile a prior bootstrap whose response was lost before trying again.
+    const candidates = (await manager().list()).filter(a => a.status !== "closed" && isOwnedNgrokAgent(a, service.id, options.port));
+    if (candidates.length > 1) throw new Error("Multiple owned ngrok agents require cleanup before retry");
+    const agent = candidates[0] || await manager().start({ cwd: service.directory, port: 4040,
+      argv: [process.execPath, ngrokWrapper, service.id, String(options.port), executable] });
+    agentId = agent.id;
+    saveRoute(service, { kind: "ngrok", ownedAgent: true, agentId });
   }
-  if (result.cleanupCommand) {
-    console.log(`Cleanup: ${result.cleanupCommand}`);
+  let lastError = "not ready";
+  const readinessDeadline = performance.now() + 60000;
+  while (performance.now() < readinessDeadline) {
+    try {
+      await activeService(service.id, options.port);
+      const agent = await activeService(agentId, 4040);
+      if (!isOwnedNgrokAgent(agent, service.id, options.port)) throw new Error("ngrok agent does not belong to this origin");
+      if (Date.parse(agent.expiresAt) < Date.parse(service.expiresAt)) throw new Error("ngrok agent lifetime does not cover origin");
+      const receipt = JSON.parse(readFileSync(path.join(agent.directory, "ngrok.json"), "utf8"));
+      validateNgrokReceipt(receipt, agent, service.id, options.port);
+      if (saved?.baseUrl && saved.baseUrl !== receipt.baseUrl) throw new Error("Delivered ngrok URL changed; refusing replacement");
+      const route = { kind: "ngrok", ownedAgent: true, agentId, name: receipt.name, target: receipt.target, baseUrl: receipt.baseUrl };
+      saveRoute(service, route);
+      return { route, agent };
+    } catch (error) { lastError = error.message; }
+    await new Promise(resolve => setTimeout(resolve, 500));
   }
-  console.log(`Caveat: ${result.caveat}`);
-  console.log("");
+  throw new Error(`Managed ngrok agent ${agentId} is not ready: ${lastError}; cleanup receipt retained`);
 }
 
 async function main() {
+  if (process.argv[2] === "cleanup") {
+    const id = process.argv[process.argv.indexOf("--service") + 1];
+    await cleanupRoute(await readService(id));
+    return;
+  }
   const options = parseArgs(process.argv.slice(2));
-  const localTarget = `http://${options.localHost}:${options.port}${options.path}`;
+  if (options.localHost !== "127.0.0.1" && options.localHost !== "localhost") throw new Error("Managed origin must be local loopback");
+  const service = await activeService(options.serviceId, options.port);
+  const localTarget = `http://127.0.0.1:${options.port}${options.path}`;
   const localProbe = await probeUrl(localTarget, options.timeoutMs);
-
-  let mobile = null;
-  let fallbackReason = "";
-
+  if (!localProbe.ok) throw new Error(`Origin probe failed: ${localProbe.error || localProbe.status}`);
+  let url, access, expiresAt = service.expiresAt, failure = "";
+  const previous = loadRoute(service);
+  if (previous && !previous.removed) {
+    options.access = previous.kind === "ngrok" ? "ngrok" : "tailscale";
+    options.preferHttps = previous.kind === "tailscale-serve";
+  }
   if (options.access !== "ngrok") {
     const tailscale = getTailscaleInfo();
     if (tailscale.available) {
-      try {
-        mobile = options.preferHttps
-          ? await tryTailscaleServe({
-              tailscale,
-              port: options.port,
-              path: options.path,
-              localHost: options.localHost,
-              timeoutMs: options.timeoutMs,
-            })
-          : await tryTailscaleDirect({
-              tailscale,
-              port: options.port,
-              path: options.path,
-              timeoutMs: options.timeoutMs,
-            });
-      } catch (error) {
-        fallbackReason = `Tailscale ${options.preferHttps ? "Serve" : "direct"} failed: ${error.message}`;
-        if (!options.preferHttps) {
-          try {
-            mobile = await tryTailscaleServe({
-              tailscale,
-              port: options.port,
-              path: options.path,
-              localHost: options.localHost,
-              timeoutMs: options.timeoutMs,
-            });
-            fallbackReason = "Direct Tailscale URL failed, so Tailscale Serve HTTPS was used.";
-          } catch (serveError) {
-            fallbackReason += `; Tailscale Serve fallback failed: ${serveError.message}`;
-          }
-        }
+      if (!options.preferHttps && !previous) {
+        const direct = `http://${tailscale.ip4}:${options.port}${options.path}`;
+        if ((await probeUrl(direct, options.timeoutMs)).ok) { url = direct; access = "tailscale-direct"; }
       }
-    } else {
-      fallbackReason = tailscale.reason;
+      if (!url && tailscale.dnsName) {
+        try {
+          const route = await withServiceResourceLock(service.id, () => createServeUnlocked(service, tailscale, options.port));
+          url = `${route.baseUrl}${options.path}`; access = route.kind;
+        } catch (error) { failure = error.message; }
+      }
+    } else failure = tailscale.reason;
+  }
+  if (!url) {
+    if (options.access === "tailscale" || loadRoute(service)?.removed === false || loadRoute(service)?.kind === "tailscale-serve") {
+      throw new Error(failure || "Tailscale unavailable; retained any route receipt for scoped cleanup");
     }
+    const result = await withServiceResourceLock(service.id, () => ngrokRouteUnlocked(service, options));
+    url = `${result.route.baseUrl}${options.path}`; access = "ngrok";
+    expiresAt = new Date(Math.min(Date.parse(expiresAt), Date.parse(result.agent.expiresAt))).toISOString();
   }
-
-  if (!mobile) {
-    if (options.access === "tailscale") {
-      throw new Error(fallbackReason || "Tailscale access was required but unavailable");
-    }
-    mobile = await tryNgrok({
-      port: options.port,
-      path: options.path,
-      timeoutMs: options.timeoutMs,
-    });
-  }
-
-  const result = {
-    primaryUrl: mobile.primaryUrl,
-    access: mobile.kind,
-    visibility: mobile.visibility,
-    localTarget,
-    alternates: mobile.alternates,
-    localProbe,
-    mobileProbe: mobile.probe,
-    fallbackReason,
-    cleanupCommand: mobile.cleanupCommand,
-    caveat: mobile.caveat,
-  };
-
-  if (options.json) {
-    console.log(JSON.stringify(result, null, 2));
-  } else {
-    printHuman(result);
-  }
+  const mobileProbe = await probeUrl(url, options.timeoutMs);
+  if (!mobileProbe.ok) throw new Error(`Mobile URL probe failed: ${mobileProbe.error || mobileProbe.status}`);
+  await activeService(service.id, options.port);
+  const result = { primaryUrl: url, access, visibility: access === "ngrok" ? "public" : "tailnet-only",
+    localTarget, localProbe, mobileProbe, serviceId: service.id, createdAt: service.createdAt, expiresAt,
+    cleanupCommand: `bun ${path.join(path.dirname(scriptPath), "mobile-service.mjs")} stop ${service.id}`,
+    caveat: "Kept until explicit user completion or expiry. Host power/network/login and tailnet access still matter; sleep does not extend expiry." };
+  if (options.json) console.log(JSON.stringify(result, null, 2));
+  else console.log(`Primary URL: ${url}\nAccess: ${result.visibility}\nService: ${service.id}\nExpires: ${expiresAt}\nCleanup after user confirmation: ${result.cleanupCommand}\n${result.caveat}`);
 }
-
-main().catch((error) => {
-  console.error(`Error: ${error.message}`);
-  process.exit(1);
-});
+if (import.meta.main) main().catch(error => { console.error(`Error: ${error.message}`); process.exitCode = 1; });

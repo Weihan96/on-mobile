@@ -45,7 +45,7 @@ Generated UI metadata uses an emoji badge such as `📱 auto`, `🟢 always`, or
 5. If HTTPS is required inside the tailnet, or the local service is loopback-only, use Tailscale Serve.
 6. If the recipient is not in the user's tailnet, or an external service must call back to the local machine, use ngrok fallback.
 7. If the user needs to judge mobile interactions, verify the final mobile URL itself, not only localhost.
-8. If the preview must stay open while the user checks it, keep the server attached to a foreground command session.
+8. All delivered mobile links must use a system-managed service and the lifecycle below, including existing ports, Markdown, videos, and tunnels. A foreground tool session is not durable hosting.
 
 Use this routing table:
 
@@ -59,28 +59,48 @@ Use this routing table:
 | Webhook, OAuth callback, or external provider must reach the local server | ngrok fallback |
 | Phone cannot keep Tailscale enabled because of VPN-slot conflicts | ngrok fallback or explain the tradeoff |
 
-## Existing Port Helper
+## Durable Link Lifetime
 
-For a local app, API, dashboard, or dev server already running on a known port, run:
+Use `scripts/mobile-service.mjs` on macOS: launchd owns the server independently of the task, restarts failures within the original lifetime, and reclaims it at expiry. Keep each link until the user explicitly says they are done or asks to close it, or seven days from service creation, whichever comes first. Viewing, playback completion, inactivity, agent completion, and task archival are not user confirmation. Never renew the deadline merely by probing, restarting, or reopening a task.
+
+Manage the origin **and** any tunnel agent. `nohup`, shell `&`, a live tool session, and persistent proxy configuration alone do not meet this requirement. For another OS/host, use an equivalent system supervisor or hosted service with explicit expiry and scoped cleanup; if unavailable, report the blocker instead of delivering a temporary URL as durable. Local hosting still needs the Mac awake, online, and logged in; after sleep/logout, enforce the original deadline before serving again.
+
+Start an existing app's production server under management before obtaining its URL (use its actual command, absolute work directory, and free port):
 
 ```bash
-bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <port> --path /
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-service.mjs start --cwd /absolute/project --port 3215 -- bun run start -- --port 3215 --hostname 0.0.0.0
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-service.mjs status <service-id>
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-service.mjs list
+```
+
+The server command must remain in the foreground as launchd’s child; do not pass a command that forks away or daemonizes itself. Use stable installed executables and files that launchd can read. macOS may block background access to protected folders such as Documents; if readiness fails there, stage the intended preview files and required assets in a durable task-owned directory under `~/.codex/mobile-previews/`, preserving relative paths, then probe again. Do not claim readiness from a PID alone.
+
+Do not take over or stop an unrelated listener. Prepare a task-owned service on a free port, or first arrange an authorized migration. Receipt IDs are returned by `start`; do not invent them. State, logs and cleanup receipts live under `${CODEX_HOME:-$HOME/.codex}/state/on-mobile/services/`. Only `running` plus a successful origin/URL probe permits delivery. The URL helper verifies the listening process belongs to the managed child tree.
+
+When the user confirms completion, run `mobile-service.mjs stop <service-id>` and check `status` until `closed`; `stopping` and `cleanup_failed` are not completed cleanup. Expiry is enforced by the worker without an active Codex turn; missed deadlines are enforced on resume. Stop only owned service jobs and exact owned routes, never shared Tailscale/ngrok daemons or other routes. Keep source/delivery files and failed-cleanup evidence. Report the service ID, exact expiry and completion command with the link. Do not schedule a chat reminder as a substitute for service expiry.
+
+## Existing Port Helper
+
+For a managed local app, API, dashboard, or production server on a known port, run:
+
+```bash
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <port> --service <service-id> --path /
 ```
 
 Useful modes:
 
 ```bash
 # Default: Tailscale first, ngrok fallback.
-bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --path /cards
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --service <service-id> --path /cards
 
 # Require Tailscale and fail instead of using ngrok.
-bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --path /cards --access tailscale
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --service <service-id> --path /cards --access tailscale
 
 # Force public ngrok fallback.
-bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --path /cards --access ngrok
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --service <service-id> --path /cards --access ngrok
 
-# Prefer Tailscale Serve HTTPS. This may create persistent Serve config.
-bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --path /cards --https
+# Prefer Tailscale Serve HTTPS. This creates an owned HTTPS port without replacing shared Serve config.
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs 3215 --service <service-id> --path /cards --https
 ```
 
 Read `references/tailscale-access.md` before manually rebuilding Tailscale checks, Serve setup, MagicDNS caveats, or direct/relay diagnostics.
@@ -95,7 +115,7 @@ bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs 
 
 The helper serves the right root for relative images, verifies local HTML, prefers Tailscale, falls back to ngrok when allowed, and prints the mobile URL.
 
-Keep the command running in the foreground while the user checks the link. Do not use `nohup ... &`, shell background jobs, or one-shot detached commands for live previews; those processes may be reclaimed after the parent command exits.
+The helper starts a managed launchd service, verifies the page and returns its URL, service ID and expiry; the calling command can exit. Markserv must have a stable installed entrypoint, not a temporary package-cache executable. Read the reference for setup. Keep the service until explicit user completion or its fixed seven-day deadline.
 
 Useful modes:
 
@@ -103,7 +123,7 @@ Useful modes:
 # Require Tailscale and fail instead of falling back to ngrok.
 bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs ./README.md --access tailscale
 
-# Force old ngrok behavior.
+# Force managed ngrok fallback.
 bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs ./README.md --access ngrok
 
 # Prefer Tailscale Serve HTTPS inside the tailnet.
@@ -128,7 +148,7 @@ For Next.js apps, build and start the production server before reporting the mob
 
 ```bash
 bun run build
-bun run start -- --port <port> --hostname 0.0.0.0
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-service.mjs start --cwd /absolute/project --port <port> -- bun run start -- --port <port> --hostname 0.0.0.0
 ```
 
 Development runtimes add HMR, overlays, websocket clients, and bundler behavior that can differ through Tailscale, Tailscale Serve, or ngrok. Do not use a development server as the reported mobile preview for interactive app checks; it can render the page while interaction state fails to update.
@@ -151,7 +171,7 @@ When the mobile URL is ready, report:
 - The local target it reaches, such as `localhost:5173`.
 - Whether HTTPS is provided by Tailscale Serve, the app server, or ngrok fallback.
 - Any caveat that matters: phone Tailscale status, MagicDNS dependency, VPN-slot conflicts, tunnel lifetime, auth, callback URL changes, warning pages, or server restart needs.
-- For Markdown previews, whether Markserv used a persistent install or temporary `bunx` fallback.
-- Any cleanup command or foreground session id needed to stop the preview.
+- For Markdown previews, the stable installed Markserv entrypoint.
+- Managed service ID, creation time, exact expiry (at most seven days), and the command to run after explicit user completion. Do not stop at task completion.
 
 Keep desktop localhost URLs secondary and diagnostic only.

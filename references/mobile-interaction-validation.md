@@ -12,10 +12,10 @@ If the user needs to judge interaction behavior, prefer a production preview ove
 
 ```bash
 bun run build
-bun run start -- -p <port> --hostname 0.0.0.0
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-service.mjs start --cwd /absolute/project --port <port> -- bun run start -- -p <port> --hostname 0.0.0.0
 ```
 
-Use development-server previews for quick visual checks only unless interaction has also been verified through the mobile URL.
+All delivered previews follow the managed lifecycle in SKILL.md, including any development preview used for a quick visual check. A dev server is not a substitute for production interaction acceptance.
 
 Development runtimes can add HMR, overlays, websocket clients, or bundler behavior that differs through a tunnel from localhost. A dev tunnel can render the page while interaction state fails to update.
 

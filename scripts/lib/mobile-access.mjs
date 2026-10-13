@@ -81,6 +81,7 @@ export function getTailscaleInfo() {
   try {
     const raw = execFileSync(command, ["status", "--json"], {
       encoding: "utf8",
+      env: { ...process.env, TERM: "xterm-256color" }, // Tailscale.app selects CLI mode via TERM.
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 5000,
     });
@@ -116,97 +117,10 @@ export function getTailscaleInfo() {
   };
 }
 
-export function getServeStatus(command) {
-  try {
-    return execFileSync(command, ["serve", "status"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 5000,
-    }).trim();
-  } catch (error) {
-    return `serve status failed: ${error.message}`;
-  }
-}
-
-export function assertServeCanBeCreated(command) {
-  const beforeStatus = getServeStatus(command);
-  if (beforeStatus && !beforeStatus.includes("No serve config")) {
-    throw new Error("Tailscale Serve already has config; refusing to overwrite it automatically");
-  }
-}
-
-export function startTailscaleServe({ tailscale, localHost = "localhost", port }) {
-  assertServeCanBeCreated(tailscale.command);
-  try {
-    execFileSync(tailscale.command, ["serve", "--bg", "--yes", `${localHost}:${port}`], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 15000,
-    });
-  } catch (error) {
-    const detail = error.stderr?.toString?.() || error.stdout?.toString?.() || error.message;
-    throw new Error(`tailscale serve failed: ${detail.trim()}`);
-  }
-}
-
-export function resetTailscaleServe(command) {
-  execFileSync(command, ["serve", "reset"], { stdio: "ignore", timeout: 5000 });
-}
-
 export async function getNgrokTunnels() {
   const response = await fetchWithTimeout("http://127.0.0.1:4040/api/tunnels", {}, 3000);
   if (!response.ok) {
     throw new Error(`ngrok API returned ${response.status}`);
   }
   return response.json();
-}
-
-export function tunnelMatchesPort(tunnel, port) {
-  const addr = tunnel?.config?.addr || "";
-  return addr === `${port}` || addr.endsWith(`:${port}`) || addr === `http://localhost:${port}`;
-}
-
-export async function getOrCreateNgrokTunnel(port, { namePrefix = "mobile-url" } = {}) {
-  let tunnels;
-  try {
-    tunnels = await getNgrokTunnels();
-  } catch (error) {
-    throw new Error(
-      `ngrok local API is unavailable. Start ngrok first, for example: ngrok http ${port}. Details: ${error.message}`,
-    );
-  }
-
-  const existing = (tunnels.tunnels || []).find((tunnel) => {
-    return tunnel.proto === "https" && tunnel.public_url && tunnelMatchesPort(tunnel, port);
-  });
-  if (existing) {
-    return { publicUrl: existing.public_url, created: false, uri: existing.uri || "" };
-  }
-
-  const response = await fetchWithTimeout(
-    "http://127.0.0.1:4040/api/tunnels",
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name: `${namePrefix}-${port}-${Date.now()}`,
-        addr: `http://localhost:${port}`,
-        proto: "http",
-      }),
-    },
-    10000,
-  );
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Failed to create ngrok tunnel: ${response.status} ${text}`);
-  }
-
-  const tunnel = await response.json();
-  return { publicUrl: tunnel.public_url, uri: tunnel.uri || "", created: true };
-}
-
-export async function deleteNgrokTunnel(uri) {
-  if (!uri) return;
-  await fetchWithTimeout(`http://127.0.0.1:4040${uri}`, { method: "DELETE" }, 3000);
 }

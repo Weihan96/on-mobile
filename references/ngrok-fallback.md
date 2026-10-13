@@ -14,45 +14,26 @@ Use ngrok when any of these are true:
 
 Do not use ngrok as the default for the user's own phone when Tailscale is available.
 
-## Workflow
+## Managed Workflow
 
-1. Identify the local port from the dev server output, configuration, or port scan.
-2. Start the local server if the task requires a running preview.
-   - If the user needs to judge mobile interaction behavior, prefer a production preview over a development server when the project supports it. For Next.js projects, prefer `bun run build` followed by `bun run start -- -p <port> --hostname 0.0.0.0` before opening the tunnel.
-   - Use dev-server tunnels for quick visual previews only unless interaction has also been verified through the public URL.
-3. Check whether an ngrok tunnel for that port already exists.
-4. If no suitable tunnel exists, start one with `ngrok http <port>`.
-5. If ngrok starts but no public tunnel appears, diagnose ngrok before falling back to a LAN URL.
-6. Read the forwarding URL from ngrok output or the local ngrok API at `http://127.0.0.1:4040/api/tunnels`.
-7. Give the user the `https://...ngrok...` URL and mention the local port it forwards to.
-
-## Commands
-
-Prefer commands that preserve the existing project tooling. For JavaScript and TypeScript projects, prefer Bun commands when starting the app.
-
-Useful checks:
+1. Build the app and start its production server with `mobile-service.mjs start`; retain its origin service ID. Do not deliver an unmanaged dev-server URL.
+2. Request the URL; the helper starts an exclusive, managed ngrok agent on free port 4040. It never adopts or stops an existing agent. If 4040 is occupied, report the conflict and arrange an authorized migration or equivalent isolated supervised configuration.
 
 ```bash
-ngrok http <port>
-curl --silent http://127.0.0.1:4040/api/tunnels
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <port> --service <origin-service-id> --access ngrok
 ```
 
-If `ngrok` is missing, tell the user and ask whether to install or configure it. If ngrok requires auth, report the exact blocker and avoid inventing a public URL.
+The agent launches its tunnel as part of its foreground command, persists the first HTTPS URL, and pins that URL on restart. It must never replace a delivered URL silently. Confirm origin, agent and public URL readiness before delivery. Report public visibility, origin service ID and exact expiry. Explicit user completion or origin expiry stops only the origin and its exclusive agent; other services and source files remain. The agent also has its own fixed seven-day expiry as a backstop.
+
+If ngrok is absent, needs authentication, or cannot resume the same URL, report the concrete blocker. Never put authentication tokens in service command arguments, receipts or logs; use ngrok's existing protected configuration. An API-created temporary tunnel under `ngrok start --none` is insufficient: it disappears when the agent restarts.
 
 ## Markdown Preview Fallback
-
-The helper script can force the old ngrok behavior:
 
 ```bash
 bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs <markdown-file-or-directory> --access ngrok
 ```
 
-If the helper script is unavailable, manually serve Markdown with Markserv and expose that port through ngrok:
-
-```bash
-markserv <serve-root> -p <port> -a 0.0.0.0 --browser false --livereloadport false
-ngrok http <port>
-```
+The helper manages both the Markdown origin and the exclusive ngrok agent. Do not fall back to foreground `markserv`/`ngrok http` commands when it fails; use equivalent supervised hosting or report the blocker.
 
 Choose the served root so Markdown image paths keep working. For example, if `docs/design/note.md` contains `![x](./note/01.png)`, serving the repository root and opening `/docs/design/note.md` should keep the image URL valid.
 
@@ -70,7 +51,7 @@ When validating interactions through ngrok:
 1. Check whether the user is still on ngrok's warning page and needs to tap `Visit Site`.
 2. Test the same control on localhost to distinguish app code from tunnel/runtime behavior.
 3. Test the public ngrok URL itself, preferably with a mobile viewport.
-4. If localhost works but a dev-server tunnel does not, restart as a production preview and create a fresh tunnel.
+4. If localhost works but a dev-server tunnel does not, prepare an owned, managed production preview and validate its new URL; retain any previously delivered link until explicit completion or expiry.
 5. Report whether the issue was an app bug or a preview-runtime false negative.
 
 Development runtimes can add HMR, overlay, websocket, or bundler clients that behave differently through ngrok than they do on localhost. A Next.js `next dev` tunnel can render the page while public-url interaction state fails to update.
@@ -94,7 +75,7 @@ If the IPv6/default checks fail with EOF, empty reply, or TLS errors while the I
 
 ```bash
 networksetup -setv6off Wi-Fi
-ngrok start <name>
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <port> --service <origin-service-id> --access ngrok
 ```
 
 Then verify the tunnel exists before giving the URL:

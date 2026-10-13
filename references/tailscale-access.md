@@ -32,30 +32,13 @@ If the Tailscale IP URL works, use it as the primary URL for the user's own phon
 
 Use Tailscale Serve when the user needs HTTPS inside the tailnet or the local server is only usable from loopback:
 
-```bash
-TS="${TS:-$(command -v tailscale 2>/dev/null || true)}"
-if [ -z "$TS" ] && [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
-  TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
-fi
-"$TS" serve --bg localhost:<port>
-"$TS" serve status
-```
+Use the managed URL helper with `--service <service-id> --https`. It chooses an unused HTTPS port, persists a route receipt, and verifies the exact phone URL. Existing ports and handlers are preserved. The resulting URL includes its HTTPS port and uses the machine's MagicDNS name.
 
-The resulting URL uses the machine's MagicDNS name:
+If HTTPS certificates require a consent page, report that blocker. Do not invent a URL or overwrite an existing route. Persistent Serve config alone does not keep the origin alive: it must belong to a managed service whose original expiry remains in force.
 
-```text
-https://<machine>.<tailnet>.ts.net/<path>
-```
+Cleanup goes through `mobile-service.mjs stop <service-id>`. It compares the exact endpoint handler with its receipt before running the scoped `tailscale serve --https=<owned-port> off`. Changed ownership is retained as a cleanup failure. Never run global `tailscale serve reset` to close one preview.
 
-If the tailnet has not enabled HTTPS certificates, `tailscale serve` may send the user to a consent page. Surface that blocker instead of inventing a URL.
-
-Treat Serve config as persistent. Report the cleanup command:
-
-```bash
-tailscale serve reset
-```
-
-Do not use Tailscale Funnel unless the user explicitly needs a public internet URL. Funnel is public; Serve is tailnet-only.
+Funnel is public; use it only when public access is explicitly required and equivalent managed lifetime/cleanup is available. Serve remains tailnet-only.
 
 ## Direct vs Relay
 
