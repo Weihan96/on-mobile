@@ -169,7 +169,7 @@ async function cleanupRouteUnlocked(service) {
 export async function cleanupRoute(service) {
   return withServiceResourceLock(service.id, () => cleanupRouteUnlocked(service));
 }
-function assertListenerOwned(service, port) {
+export function assertListenerOwned(service, port) {
   const raw = execFileSync("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], { encoding: "utf8", timeout: 5000 });
   const pids = [...raw.matchAll(/^p(\d+)$/gm)].map(m => Number(m[1]));
   if (!pids.length) throw new Error("No listener for managed service");

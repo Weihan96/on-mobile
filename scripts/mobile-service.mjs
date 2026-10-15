@@ -124,11 +124,19 @@ export function createManager(options = {}) {
   const spawnChild = options.spawn || spawn;
   const sleep = options.sleep || pause;
   const directoryFor = id => { ensure(ID.test(id), 'Invalid service ID'); return path.join(stateRoot, id); };
-  async function manifest(id) {
+  async function manifest(id, ancestors = new Set()) {
+    ensure(!ancestors.has(id) && ancestors.size < 64, 'Invalid lifetime ancestry');
+    ancestors.add(id);
     const directory = directoryFor(id);
     const r = await readJSON(path.join(directory, 'service.json'));
     ensure(r.id === id && r.ownerUid === uid && r.label === LABEL_PREFIX + id && r.directory === directory && r.plistPath === path.join(agentsRoot, r.label + '.plist'), 'Service ownership mismatch; refusing operation');
-    ensure(r.expiresAt === expiresAt(r.createdAt), 'Invalid service lifetime; refusing operation');
+    let deadline = expiresAt(r.createdAt);
+    if (r.inheritFrom) {
+      ensure(r.version === 2, 'Invalid inherited service version');
+      const prior = await manifest(r.inheritFrom, ancestors);
+      deadline = new Date(Math.min(Date.parse(deadline), Date.parse(prior.expiresAt))).toISOString();
+    }
+    ensure(r.expiresAt === deadline, 'Invalid service lifetime; refusing operation');
     return r;
   }
   async function runtime(r) {
@@ -192,14 +200,17 @@ export function createManager(options = {}) {
       return false;
     }
   }
-  async function start({ cwd, port, argv }) {
+  async function start({ cwd, port, argv, inheritFrom }) {
     backend.assertPlatform();
     ensure(path.isAbsolute(cwd || '') && (await fs.stat(cwd)).isDirectory(), '--cwd must be an existing absolute directory');
     ensure(Number.isInteger(port) && port > 0 && port < 65536, '--port must be 1..65535');
     ensure(Array.isArray(argv) && argv.length && argv.every(a => typeof a === 'string' && !a.includes('\0')), 'Command argv required');
+    const prior = inheritFrom ? await manifest(inheritFrom) : null;
+    ensure(!prior || !expired(prior, now()), 'Original delivery has expired; restoration cannot renew it');
     await backend.portAvailable(port);
     const id = crypto.randomUUID(), directory = directoryFor(id), createdAt = new Date(now()).toISOString();
     const r = { version: 1, id, ownerUid: uid, label: LABEL_PREFIX + id, directory, createdAt, expiresAt: expiresAt(createdAt), cwd: await fs.realpath(cwd), port, argv: [await executable(argv[0], cwd), ...argv.slice(1)], bun: await fs.realpath(process.execPath), script: await fs.realpath(SCRIPT), plistPath: path.join(agentsRoot, LABEL_PREFIX + id + '.plist') };
+    if (prior) { r.version = 2; r.inheritFrom = prior.id; r.expiresAt = new Date(Math.min(Date.parse(r.expiresAt), Date.parse(prior.expiresAt))).toISOString(); }
     await fs.mkdir(directory, { recursive: true, mode: 0o700 }); await fs.mkdir(agentsRoot, { recursive: true });
     await atomicJSON(path.join(directory, 'service.json'), r);
     await fs.writeFile(r.plistPath, plist(r, stateRoot, agentsRoot), { flag: 'wx', mode: 0o600 });
@@ -292,8 +303,8 @@ async function cli(args) {
   const manager = defaultManager();
   if (command === 'start') {
     const delimiter = args.indexOf('--'); ensure(delimiter >= 0, 'Usage: start --cwd ABS --port PORT -- COMMAND ARGS...');
-    const flags = args.slice(0, delimiter); ensure(flags.length === 4 && flags[0] === '--cwd' && flags[2] === '--port', 'Usage: start --cwd ABS --port PORT -- COMMAND ARGS...');
-    return manager.start({ cwd: flags[1], port: Number(flags[3]), argv: args.slice(delimiter + 1) });
+    const flags = args.slice(0, delimiter); ensure([4, 6].includes(flags.length) && flags[0] === '--cwd' && flags[2] === '--port' && (flags.length === 4 || flags[4] === '--inherit'), 'Usage: start --cwd ABS --port PORT [--inherit ORIGINAL_ID] -- COMMAND ARGS...');
+    return manager.start({ cwd: flags[1], port: Number(flags[3]), inheritFrom: flags[5], argv: args.slice(delimiter + 1) });
   }
   if (command === 'list') { ensure(!args.length, 'list takes no arguments'); return manager.list(); }
   ensure(args.length === 1 && ['status', 'stop'].includes(command), 'Usage: status ID | stop ID | list');

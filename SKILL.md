@@ -79,6 +79,12 @@ Do not take over or stop an unrelated listener. Prepare a task-owned service on 
 
 When the user confirms completion, run `mobile-service.mjs stop <service-id>` and check `status` until `closed`; `stopping` and `cleanup_failed` are not completed cleanup. Expiry is enforced by the worker without an active Codex turn; missed deadlines are enforced on resume. Stop only owned service jobs and exact owned routes, never shared Tailscale/ngrok daemons or other routes. Keep source/delivery files and failed-cleanup evidence. Report the service ID, exact expiry and completion command with the link. Do not schedule a chat reminder as a substitute for service expiry.
 
+## Recover Existing Deliveries
+
+For broken links, missing media, deleted worktrees, endpoint limits, or reuse of a shared public entry, read [delivery recovery](references/delivery-recovery.md). Inventory before changing anything; a page returning 200 does not prove its video or images exist. Use the original service deadline when restoring (`start ... --inherit ORIGINAL_ID`), never a fresh seven days. Preserve active routes and shared transports. Reuse only ownership-verified supported gateways; distinguish current reachability from proven restart behavior. If the same URL cannot be recovered, disclose the failure and any proposed replacement before presenting it as the original.
+
+Use `mobile-delivery.mjs` for configurable allowlisted static files, galleries, link indexes and owned gateway subpaths; use `mobile-links.mjs` for read-only file/media/transport audits. Keep task paths, URLs, service IDs and receipts outside the skill repository. Bun is an installed dependency, not a bundled binary; retain its genuine developer signature.
+
 ## Existing Port Helper
 
 For a managed local app, API, dashboard, or production server on a known port, run:

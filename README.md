@@ -42,6 +42,10 @@ Keep phone preview links alive after the agent task ends, until you explicitly f
 
 The skill prefers private Tailscale URLs and uses ngrok when public access is required or Tailscale is unavailable. Both origin and tunnel are supervised. A task ending, page view, playback completion or inactivity never counts as your confirmation. Restarting or probing does not renew the fixed seven-day deadline.
 
+### Recovery and shared entries
+
+Use the bundled `mobile-delivery.mjs` for allowlisted MP4s, pages, assets and link indexes, and `mobile-links.mjs` to audit files, video bytes/codecs and existing transports. Restored services use `mobile-service.mjs start ... --inherit ORIGINAL_ID` to retain their original deadline. Supported delivery gateways can add and remove owned subpaths while preserving other routes; arbitrary existing servers require a reviewed migration. See [recovery configuration and verification](references/delivery-recovery.md).
+
 ### Limits and troubleshooting
 
 Local hosting requires the Mac awake, online and logged in. On resume after expiry, cleanup runs before serving again. ngrok URLs are public; provider account limits and availability still apply. Only owned services/routes are reclaimed; source files and other tasks' services remain. The helper refuses an unmanaged source or an unrelated ngrok listener on port 4040.
@@ -75,6 +79,8 @@ Tests cover fixed expiry, ownership, cleanup retries, crash-safe locks and pinne
 默认优先私有 Tailscale 链接；必要时使用公网 ngrok。源服务和隧道均由系统管理。用户明确确认用完才提前回收，否则创建满七天关闭；访问、播放完成、任务结束或重启都不续期。不会删除交付文件或关闭其他任务的服务。
 
 电脑仍须唤醒、联网并登录，daemon 不代表离线也能访问。ngrok 是公网服务，受账号与平台限制。端口占用时换空闲端口，不杀别人的进程；后台无法读 Documents 时，将交付内容放到稳定的 `~/.codex/mobile-previews/` 子目录；手机无法连接时检查 Tailscale/VPN；回收失败时查看日志并重试，不重置共享路由。
+
+新增的恢复工具支持明确白名单中的视频、图册与链接汇总，检查真实文件、编码、分段响应及共享入口归属。恢复必须继承原截止时间；受支持的交付网关可添加独立子路径，回收时保留其他入口。既有自定义服务器须先验证迁移方案，当前可访问不代表共享代理重启后同一地址一定恢复。详见上方恢复文档。
 
 ## Credits and license / 致谢与许可
 

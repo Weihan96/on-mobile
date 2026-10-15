@@ -169,3 +169,22 @@ test('shared lock remains exclusive across processes and recovers after holder S
     await pending; expect(entered).toBe(true);
   } finally { child.kill('SIGKILL'); await child.exited; }
 });
+
+test('restoration inherits the original deadline through multiple generations', async()=>{
+  const original=await started();time+=86400000;
+  const restored=await manager.start({cwd:root,port:43211,argv:[process.execPath,'--version'],inheritFrom:original.id});
+  expect(restored.version).toBe(2);expect(restored.expiresAt).toBe(original.expiresAt);expect(restored.createdAt).not.toBe(original.createdAt);
+  time+=86400000;const next=await manager.start({cwd:root,port:43212,argv:[process.execPath,'--version'],inheritFrom:restored.id});
+  expect(next.expiresAt).toBe(original.expiresAt);
+  time=Date.parse(original.expiresAt);
+  await expect(manager.start({cwd:root,port:43213,argv:[process.execPath,'--version'],inheritFrom:next.id})).rejects.toThrow('cannot renew');
+});
+test('inherited lifetime cannot be tampered with or made cyclic',async()=>{
+  const original=await started();time+=1000;
+  const restored=await manager.start({cwd:root,port:43211,argv:[process.execPath,'--version'],inheritFrom:original.id});
+  const file=path.join(restored.directory,'service.json');
+  await fs.writeFile(file,JSON.stringify({...restored,expiresAt:expiresAt(restored.createdAt)}));
+  await expect(manager.readService(restored.id)).rejects.toThrow('lifetime');
+  await fs.writeFile(file,JSON.stringify({...restored,inheritFrom:restored.id}));
+  await expect(manager.readService(restored.id)).rejects.toThrow('ancestry');
+});
