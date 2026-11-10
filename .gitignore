@@ -1,2 +1,5 @@
 .local/
 agents/openai.yaml
+
+.env
+.env.*

@@ -24,6 +24,7 @@ Options:
   --port, -p <port>       Preferred local Markserv port. Defaults to 8642.
   --access <mode>         auto, tailscale, or ngrok. Defaults to auto.
   --tailscale             Alias for --access tailscale.
+  --ngrok-account <id>    Explicit account from the local inventory.
   --ngrok                 Alias for --access ngrok.
   --https                 Prefer Tailscale Serve HTTPS instead of direct HTTP.
 `);
@@ -39,6 +40,7 @@ function parseArgs(argv) {
   let port = 8642;
   let access = "auto";
   let preferHttps = false;
+  let ngrokAccount = "";
   const positional = [];
 
   for (let i = 0; i < args.length; i += 1) {
@@ -50,6 +52,9 @@ function parseArgs(argv) {
       }
       port = Number(next);
       i += 1;
+    } else if (arg === "--ngrok-account") {
+      ngrokAccount = args[++i];
+      if (!ngrokAccount || ngrokAccount.startsWith("--")) throw new Error("--ngrok-account requires an ID");
     } else if (arg === "--access") {
       const next = args[i + 1];
       if (!["auto", "tailscale", "ngrok"].includes(next)) {
@@ -73,7 +78,7 @@ function parseArgs(argv) {
     throw new Error("Expected exactly one Markdown file or directory target");
   }
 
-  return { target: positional[0], port, access, preferHttps };
+  return { target: positional[0], port, access, preferHttps, ngrokAccount };
 }
 
 function gitRootFor(targetPath) {
@@ -208,6 +213,7 @@ async function main() {
   if (!id) {
     const port = await choosePort(options.port);
     const args = [scriptPath, resolved.targetPath, "--port", String(port), "--access", options.access];
+    if (options.ngrokAccount) args.push("--ngrok-account", options.ngrokAccount);
     if (options.preferHttps) args.push("--https");
     const service = JSON.parse(execFileSync(process.execPath,
       [manager, "start", "--cwd", resolved.serveRoot, "--port", String(port), "--", process.execPath, ...args],
@@ -245,6 +251,7 @@ async function main() {
     const local = await guard(waitForHtmlUrl(localUrl, "local Markdown"));
     const localImage = await guard(verifyImage(localUrl, await local.response.text()));
     const args = [urlHelper, String(options.port), "--service", id, "--path", resolved.pagePath, "--access", options.access, "--json"];
+    if (options.ngrokAccount) args.push("--ngrok-account", options.ngrokAccount);
     if (options.preferHttps) args.push("--https");
     const result = JSON.parse(execFileSync(process.execPath, args, { encoding: "utf8", timeout: 75000 }));
     const mobile = await guard(waitForHtmlUrl(result.primaryUrl, "mobile Markdown",

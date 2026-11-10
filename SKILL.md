@@ -142,6 +142,8 @@ Read `references/markdown-preview.md` for Markserv installation policy, Codex mo
 
 Use ngrok only when Tailscale is unavailable, insufficient, explicitly requested, or the task needs a public internet URL.
 
+Before ngrok use, read the local `.env` inventory with `mobile-ngrok-accounts.mjs list`, verify the selected dashboard identity and current quota, and inspect existing agents and ownership. Account changes require the user’s explicit selection; never rotate accounts automatically or use switching to evade provider quotas. Keep all account names, emails, domains and configuration paths in local `.env`, excluded from Git and releases; credentials stay in the existing protected ngrok config. Preserve `.env` and `.local/` across verified release installation.
+
 Read `references/ngrok-fallback.md` before using ngrok. That reference covers tunnel discovery, warning-page behavior, public URL reporting, interaction validation over ngrok, and the known IPv6/EOF workaround.
 
 Do not use Tailscale Funnel unless the user explicitly needs a public internet URL. Funnel is public; Tailscale Serve is tailnet-only.

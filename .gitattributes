@@ -1,0 +1,3 @@
+/.env* export-ignore
+/.local export-ignore
+/agents/openai.yaml export-ignore

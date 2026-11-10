@@ -17,21 +17,67 @@ Do not use ngrok as the default for the user's own phone when Tailscale is avail
 ## Managed Workflow
 
 1. Build the app and start its production server with `mobile-service.mjs start`; retain its origin service ID. Do not deliver an unmanaged dev-server URL.
-2. Request the URL; the helper starts an exclusive, managed ngrok agent on free port 4040. It never adopts or stops an existing agent. If 4040 is occupied, report the conflict and arrange an authorized migration or equivalent isolated supervised configuration.
+2. Complete the account checks below and pass `--ngrok-account ACCOUNT_ID`. Request the URL; the helper starts an exclusive, managed ngrok agent on free port 4040. It never adopts or stops an existing agent. If 4040 is occupied, report the conflict and arrange an authorized migration or equivalent isolated supervised configuration.
 
 ```bash
-bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <port> --service <origin-service-id> --access ngrok
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <port> --service <origin-service-id> --access ngrok --ngrok-account <account-id>
 ```
 
 The agent launches its tunnel as part of its foreground command, persists the first HTTPS URL, and pins that URL on restart. It must never replace a delivered URL silently. Confirm origin, agent and public URL readiness before delivery. Report public visibility, origin service ID and exact expiry. Explicit user completion or origin expiry stops only the origin and its exclusive agent; other services and source files remain. The agent also has its own fixed seven-day expiry as a backstop.
 
 If ngrok is absent, needs authentication, or cannot resume the same URL, report the concrete blocker. Never put authentication tokens in service command arguments, receipts or logs; use ngrok's existing protected configuration. An API-created temporary tunnel under `ngrok start --none` is insufficient: it disappears when the agent restarts.
 
+## Local Account Inventory and Explicit Switching
+
+Account resources belong in `<installed-skill>/.env` (mode `0600`), never in public skill text, tests or release payloads. Use one literal JSON assignment; the helper does not source shell code or interpolate variables:
+
+```dotenv
+ON_MOBILE_NGROK_ACCOUNTS='[{"id":"personal","name":"Example","email":"owner@example.invalid","configPath":"/absolute/private/ngrok.yml","domain":"https://example.invalid","history":"Past observations only; current quota unknown"}]'
+```
+
+Use an empty `domain` when unknown. Each account needs its own absolute configuration path (no comma-separated config merge). Never copy authtokens or API keys into this file. Existing ngrok config files remain untouched and must be owned regular files with private permissions. The helper suppresses provider stdout/stderr and rejects changed configurations before restart; inspect provider diagnostics locally without pasting secrets if readiness fails.
+
+1. Run `bun <skill>/scripts/mobile-ngrok-accounts.mjs list`. It shows local identities, historical notes, recorded checks, and live managed-agent ownership. It does not query live provider quota or claim unmanaged agents belong to this skill.
+2. In the selected account’s dashboard, verify the email/account, its domain, current usage and available quota, and active agent sessions. Inspect local listeners too. Do not infer identity from a filename, a working URL, or the token’s shape. A past limit error is historical; quotas can reset. Unknown/exhausted quota stops new creation or switching; investigate or use the provider’s legitimate upgrade/reset process, never automatic account rotation.
+3. After actually observing that dashboard, record it:
+
+```bash
+bun <skill>/scripts/mobile-ngrok-accounts.mjs check ACCOUNT_ID --identity ACCOUNT_EMAIL --quota available --source dashboard
+```
+
+`unknown` and `exhausted` can also be recorded but do not authorize use. The record binds the exact configuration bytes to the identity and expires after 30 minutes. It is a local observation, not a live quota API. Never fabricate an available check to make a command pass. Restarts of an already owned agent preserve the binding and original deadline without requiring a new manual check on each restart. A managed Markdown origin also resumes its persisted route after restart; after an explicit switch, that route’s current binding takes precedence over the original account argument. This internal resume path requires the actual managed Markdown parent process and still verifies the binding/configuration, listener ownership and pinned URL.
+
+4. For a new tunnel, choose the account explicitly:
+
+```bash
+bun <skill>/scripts/mobile-url-for-port.mjs PORT --service ORIGIN_ID --access ngrok --ngrok-account ACCOUNT_ID --json
+```
+
+The wrapper passes exactly that `--config`, strips `NGROK_*` environment overrides, pins the account’s domain (or first acquired URL), verifies ownership and reconnects to the same URL before reporting ready. No default configuration is overwritten. Port 4040 remains exclusive; an unrelated listener is a blocker, never a reason to kill another process.
+
+5. To change an existing tunnel, first show the user the origin ID, old/new identities, current quota observations, old URL and expected new domain (or unknown), original expiry and likely brief interruption. Only after the user explicitly selects the change:
+
+```bash
+bun <skill>/scripts/mobile-url-for-port.mjs PORT --service ORIGIN_ID --access ngrok --ngrok-account NEW_ID --switch-ngrok-from OLD_ID --json
+```
+
+The helper verifies the exact old agent/receipt/listener, records the switch intent, stops only that agent, and starts a replacement inheriting the origin’s original deadline. It leaves the origin and other services running. Legacy receipts are identified as `legacy-unverified`; migrating one requires that exact source ID plus manual dashboard ownership checks. A mismatched account, unrelated route, inactive origin, stale quota check or occupied API port must not trigger a broader cleanup.
+
+Report `accountSwitch.oldUrl`, `newUrl`, `urlChanged`, origin ID and unchanged expiry. If replacement fails, report the interruption; retain `ngrok-switch.json`, route and agent receipts for inspection. Do not claim success, rotate accounts, or silently restore another identity. A partial new agent can be inspected and completed with the normal URL command after fresh checks, or explicitly cleaned up; do not blindly rerun a switch against the old account.
+
+### Installation and upgrade preservation
+
+Before replacing an installation, back up the whole old tree outside skill discovery, including local `.env`, `.local/` and generated UI metadata. Publish from an explicit committed version: packages exclude `.env*`, `.local/`, generated `agents/openai.yaml` and all Git storage. Scan the package for real account identifiers and credentials before publication. Install only the downloaded, checksum-verified version. Restore local `.env` with mode `0600` and `.local/` from the backup, then run `mobile-mode.mjs get` to regenerate UI metadata. Verify release payload separately from these explicitly restored local files. Never upload local resources as release assets or replace protected ngrok config files.
+
+Official references: [agent configuration and environment precedence](https://ngrok.com/docs/gateway/agent/config/), [current usage](https://dashboard.ngrok.com/usage), [free-plan limits](https://ngrok.com/docs/pricing-limits/free-plan-limits/).
+
 ## Markdown Preview Fallback
 
 ```bash
-bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs <markdown-file-or-directory> --access ngrok
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/serve-markdown-mobile.mjs <markdown-file-or-directory> --access ngrok --ngrok-account <account-id>
 ```
+
+Pass `--ngrok-account` after completing the same dashboard checks. For an existing preview, use its original service ID with the URL helper’s explicit switch command; do not create a second origin or renew its deadline.
 
 The helper manages both the Markdown origin and the exclusive ngrok agent. Do not fall back to foreground `markserv`/`ngrok http` commands when it fails; use equivalent supervised hosting or report the blocker.
 
@@ -75,7 +121,7 @@ If the IPv6/default checks fail with EOF, empty reply, or TLS errors while the I
 
 ```bash
 networksetup -setv6off Wi-Fi
-bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <port> --service <origin-service-id> --access ngrok
+bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <port> --service <origin-service-id> --access ngrok --ngrok-account <account-id>
 ```
 
 Then verify the tunnel exists before giving the URL:

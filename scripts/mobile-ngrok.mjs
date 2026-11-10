@@ -6,6 +6,7 @@ import net from 'node:net';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readService } from './mobile-service.mjs';
+import { validateBinding } from './lib/ngrok-accounts.mjs';
 import { getNgrokTunnels } from './lib/mobile-access.mjs';
 const SCRIPT = fileURLToPath(import.meta.url);
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -17,7 +18,7 @@ function httpsUrl(value) {
 }
 export function isOwnedNgrokAgent(agent, originId, port) {
   const a = agent.argv;
-  return agent.port === 4040 && Array.isArray(a) && a.length === 5 && a[0] === agent.bun && a[1] === SCRIPT && a[2] === originId && a[3] === String(port) && path.isAbsolute(a[4]);
+  return agent.port === 4040 && Array.isArray(a) && [5, 6].includes(a.length) && a[0] === agent.bun && a[1] === SCRIPT && a[2] === originId && a[3] === String(port) && path.isAbsolute(a[4]) && (a.length === 5 || path.isAbsolute(a[5]));
 }
 export function validateTunnel(tunnel, originId, port, pinnedUrl) {
   ensure(tunnel?.name === nameFor(originId), 'ngrok tunnel name does not match its origin');
@@ -60,10 +61,13 @@ export async function runNgrok(originId, port, executable, dependencies = {}) {
   ensure(agentId && path.isAbsolute(executable) && Number.isInteger(port) && port > 0 && port < 65536, 'Usage: mobile-ngrok.mjs ORIGIN_ID PORT ABS_NGROK (managed service only)');
   const agent = await read(agentId);
   ensure(isOwnedNgrokAgent(agent, originId, port) && agent.argv[4] === executable, 'Wrapper argv does not match managed ownership');
+  const bindingFile = agent.argv[5];
+  const account = bindingFile ? await validateBinding(JSON.parse(await fs.readFile(bindingFile, 'utf8'))) : null;
   const file = path.join(agent.directory, 'ngrok.json');
   let saved;
   try { saved = JSON.parse(await fs.readFile(file, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   if (saved) ensure(saved.originServiceId === originId && saved.agentServiceId === agentId && saved.target === targetFor(port) && saved.name === nameFor(originId) && httpsUrl(saved.baseUrl), 'Invalid persisted ngrok ownership or URL');
+  if (saved) ensure(JSON.stringify(saved.account || null) === JSON.stringify(account), 'Persisted account binding changed');
   let child = null, ended = true, requested = false, exitPromise;
   const signal = () => { requested = true; };
   process.on('SIGTERM', signal); process.on('SIGINT', signal);
@@ -79,8 +83,13 @@ export async function runNgrok(originId, port, executable, dependencies = {}) {
   };
   const start = async pinnedUrl => {
     await active(); await checkPort(); await active();
-    const args = ['http', targetFor(port), '--name', nameFor(originId), ...(pinnedUrl ? ['--url', pinnedUrl] : [])];
-    child = spawnChild(executable, args, { stdio: 'inherit', env: process.env }); ended = false;
+    if (account) await validateBinding(account);
+    const requestedUrl = pinnedUrl || account?.domain;
+    const args = ['http', targetFor(port), '--name', nameFor(originId), ...(account ? ['--config', account.configPath] : []), ...(requestedUrl ? ['--url', requestedUrl] : [])];
+    // Environment credentials override --config. Omit all NGROK_* overrides and
+    // suppress provider output: it can include sensitive configuration details.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('NGROK_')));
+    child = spawnChild(executable, args, { stdio: 'ignore', env }); ended = false;
     exitPromise = new Promise(resolve => { child.once('exit', () => { ended = true; resolve(); }); child.once('error', () => { ended = true; resolve(); }); });
     const deadline = monotonic() + 25000;
     let failure = new Error('ngrok tunnel did not become ready');
@@ -89,7 +98,7 @@ export async function runNgrok(originId, port, executable, dependencies = {}) {
       try {
         await checkOwner(child.pid);
         const found = (await tunnels()).tunnels?.find(t => t.name === nameFor(originId));
-        if (found) { validateTunnel(found, originId, port, pinnedUrl); ensure(monotonic() < deadline, 'ngrok readiness deadline elapsed'); return found; }
+        if (found) { validateTunnel(found, originId, port, requestedUrl); ensure(monotonic() < deadline, 'ngrok readiness deadline elapsed'); return found; }
       } catch (error) { failure = error; }
       await sleep(300);
     }
@@ -98,7 +107,7 @@ export async function runNgrok(originId, port, executable, dependencies = {}) {
   try {
     if (!saved) {
       const first = await start();
-      saved = { originServiceId: originId, agentServiceId: agentId, name: nameFor(originId), target: targetFor(port), baseUrl: first.public_url, phase: 'discovered' };
+      saved = { originServiceId: originId, agentServiceId: agentId, name: nameFor(originId), target: targetFor(port), baseUrl: first.public_url, phase: 'discovered', ...(account ? { account } : {}) };
       await atomicReceipt(file, saved);
       await terminate();
     }
@@ -120,6 +129,6 @@ export async function runNgrok(originId, port, executable, dependencies = {}) {
   }
 }
 if (import.meta.main) {
-  try { ensure(process.argv.length === 5, 'Expected origin ID, port and absolute ngrok executable'); await runNgrok(process.argv[2], Number(process.argv[3]), process.argv[4]); }
+  try { ensure([5, 6].includes(process.argv.length), 'Expected origin ID, port and absolute ngrok executable'); await runNgrok(process.argv[2], Number(process.argv[3]), process.argv[4]); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }

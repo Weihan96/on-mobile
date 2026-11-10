@@ -72,3 +72,22 @@ test('route receipt is replaced atomically with no temporary files left', async 
   expect(JSON.parse(await fs.readFile(path.join(directory, 'route.json'), 'utf8')).removed).toBe(true);
   expect(await fs.readdir(directory)).toEqual(['route.json']);
 });
+test('account-bound wrapper selects one config, pins its domain and strips environment credential overrides', async () => {
+  const { configFingerprint } = await import('../scripts/lib/ngrok-accounts.mjs');
+  const config = path.join(directory, 'account.yml'), bindingFile = path.join(directory, 'binding.json');
+  await fs.writeFile(config, 'version: 3\n', { mode: 0o600 });
+  const binding = { accountId: 'fixture', configPath: config, configHash: await configFingerprint(config), domain: url };
+  await fs.writeFile(bindingFile, JSON.stringify(binding)); agent.argv.push(bindingFile);
+  const original = deps.spawn; const environments = [];
+  deps.spawn = (exe, args, options) => { environments.push(options); return original(exe, args); };
+  process.env.NGROK_AUTHTOKEN = 'fixture-override';
+  try { await expect(runNgrok('origin', 43210, '/bin/ngrok', deps)).rejects.toThrow('test monitor complete'); }
+  finally { delete process.env.NGROK_AUTHTOKEN; }
+  expect(starts).toHaveLength(2);
+  expect(starts[0].args).toContain(config); expect(starts[0].args.slice(-2)).toEqual(['--url', url]);
+  expect(environments.every(o => !('NGROK_AUTHTOKEN' in o.env) && o.stdio === 'ignore')).toBe(true);
+  const receipt = JSON.parse(await fs.readFile(path.join(directory, 'ngrok.json'), 'utf8'));
+  expect(receipt.account.accountId).toBe('fixture');
+  await fs.appendFile(config, '# change\n'); starts.length = 0;
+  await expect(runNgrok('origin', 43210, '/bin/ngrok', deps)).rejects.toThrow('changed'); expect(starts).toHaveLength(0);
+});

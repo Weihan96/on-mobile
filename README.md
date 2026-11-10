@@ -46,6 +46,12 @@ The skill prefers private Tailscale URLs and uses ngrok when public access is re
 
 Use the bundled `mobile-delivery.mjs` for allowlisted MP4s, pages, assets and link indexes, and `mobile-links.mjs` to audit files, video bytes/codecs and existing transports. Restored services use `mobile-service.mjs start ... --inherit ORIGINAL_ID` to retain their original deadline. Supported delivery gateways can add and remove owned subpaths while preserving other routes; arbitrary existing servers require a reviewed migration. See [recovery configuration and verification](references/delivery-recovery.md).
 
+### Private ngrok accounts
+
+Keep the local account inventory in the installation’s ignored `.env`; credentials remain in the existing protected ngrok configuration files. Run `mobile-ngrok-accounts.mjs list`, verify the selected dashboard identity/current quota, record that observation with `check`, and pass `--ngrok-account ID` to the URL or Markdown helper. Changing an existing tunnel also requires `--switch-ngrok-from OLD_ID`. Only its owned agent is replaced; the origin and original deadline are retained. No automatic account rotation. See [account checks and switching](references/ngrok-fallback.md).
+
+Release upgrades must preserve `.env`, `.local/` and mode preferences outside skill discovery before replacement. Download an explicit release, verify its published checksum, inspect/extract it safely, then restore local resources and regenerate UI metadata with `mobile-mode.mjs get`. Those private files are not release assets.
+
 ### Limits and troubleshooting
 
 Local hosting requires the Mac awake, online and logged in. On resume after expiry, cleanup runs before serving again. ngrok URLs are public; provider account limits and availability still apply. Only owned services/routes are reclaimed; source files and other tasks' services remain. The helper refuses an unmanaged source or an unrelated ngrok listener on port 4040.

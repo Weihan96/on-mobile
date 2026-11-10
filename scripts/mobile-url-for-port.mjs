@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createManager, readService, registerCleanup, withServiceResourceLock } from "./mobile-service.mjs";
 import { getTailscaleInfo, probeUrl, commandPath } from "./lib/mobile-access.mjs";
 import { isOwnedNgrokAgent, validateNgrokReceipt } from "./mobile-ngrok.mjs";
+import { checkedAccount, resolveAccountForRoute } from "./lib/ngrok-accounts.mjs";
 const scriptPath = fileURLToPath(import.meta.url);
 const ngrokWrapper = path.join(path.dirname(scriptPath), "mobile-ngrok.mjs");
 const manager = () => createManager({ stateRoot: process.env.ON_MOBILE_STATE_ROOT, agentsRoot: process.env.ON_MOBILE_AGENTS_ROOT });
@@ -30,6 +31,8 @@ Options:
   --https                 Prefer Tailscale Serve HTTPS instead of direct HTTP.
   --local-host <host>     Local host to probe and expose. Defaults to 127.0.0.1.
   --timeout <ms>          Probe timeout. Defaults to 5000.
+  --ngrok-account <id>    Account from the local .env inventory (new tunnels).
+  --switch-ngrok-from <id> Explicitly replace only this origin’s ngrok agent; use legacy-unverified for a verified legacy agent.
   --json                  Print machine-readable JSON only.
 `);
 }
@@ -48,11 +51,16 @@ function parseArgs(argv) {
   let json = false;
   let localHost = "127.0.0.1";
   let timeoutMs = 5000;
+  let ngrokAccount = "", switchNgrokFrom = "";
   const positional = [];
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (arg === "--service") {
+    if (arg === "--ngrok-account" || arg === "--switch-ngrok-from") {
+      const value = args[++i];
+      if (!value || value.startsWith("--")) throw new Error(`${arg} requires an account ID`);
+      if (arg === "--ngrok-account") ngrokAccount = value; else switchNgrokFrom = value;
+    } else if (arg === "--service") {
       const value = args[++i];
       if (!value) throw new Error(`${arg} requires an id`);
       serviceId = value;
@@ -106,7 +114,7 @@ function parseArgs(argv) {
     preferHttps,
     json,
     localHost,
-    timeoutMs,
+    timeoutMs, ngrokAccount, switchNgrokFrom,
   };
 }
 
@@ -225,19 +233,34 @@ async function ngrokRouteUnlocked(service, options) {
   await activeService(service.id, options.port);
   const saved = loadRoute(service);
   if (saved && !saved.removed && saved.kind !== "ngrok") throw new Error("Cannot replace a delivered service route");
+  const verifiedAccount = await resolveAccountForRoute({ saved, requestedId: options.ngrokAccount, managedResume: options.managedResume }, {
+    check: checkedAccount,
+    binding: async id => {
+      const agent = await readService(id);
+      if (!isOwnedNgrokAgent(agent, service.id, options.port) || !agent.argv[5]) throw new Error("Resume requires an owned account-bound agent");
+      return JSON.parse(readFileSync(agent.argv[5], "utf8"));
+    },
+  });
   let agentId = saved && !saved.removed ? saved.agentId : null;
   if (!agentId) {
     const executable = commandPath("ngrok");
     if (!path.isAbsolute(executable)) throw new Error("ngrok executable not found");
-    saveRoute(service, { kind: "ngrok", ownedAgent: true, agentId: null });
+    const account = verifiedAccount;
+    const bindingFile = path.join(service.directory, `ngrok-account-${crypto.randomUUID()}.json`);
+    writeFileSync(bindingFile, JSON.stringify(account), { flag: "wx", mode: 0o600 });
+    saveRoute(service, { kind: "ngrok", ownedAgent: true, agentId: null, accountId: account.accountId });
     await registerCleanup(service.id, [process.execPath, scriptPath, "cleanup", "--service", service.id]);
     // Reconcile a prior bootstrap whose response was lost before trying again.
     const candidates = (await manager().list()).filter(a => a.status !== "closed" && isOwnedNgrokAgent(a, service.id, options.port));
     if (candidates.length > 1) throw new Error("Multiple owned ngrok agents require cleanup before retry");
-    const agent = candidates[0] || await manager().start({ cwd: service.directory, port: 4040,
-      argv: [process.execPath, ngrokWrapper, service.id, String(options.port), executable] });
+    if (candidates[0]) {
+      const file = candidates[0].argv[5];
+      if (!file || JSON.stringify(JSON.parse(readFileSync(file, "utf8"))) !== JSON.stringify(account)) throw new Error("Existing agent belongs to another or unverified account; inspect before switching");
+    }
+    const agent = candidates[0] || await manager().start({ cwd: service.directory, port: 4040, inheritFrom: service.id,
+      argv: [process.execPath, ngrokWrapper, service.id, String(options.port), executable, bindingFile] });
     agentId = agent.id;
-    saveRoute(service, { kind: "ngrok", ownedAgent: true, agentId });
+    saveRoute(service, { kind: "ngrok", ownedAgent: true, agentId, accountId: account.accountId });
   }
   let lastError = "not ready";
   const readinessDeadline = performance.now() + 60000;
@@ -249,14 +272,37 @@ async function ngrokRouteUnlocked(service, options) {
       if (Date.parse(agent.expiresAt) < Date.parse(service.expiresAt)) throw new Error("ngrok agent lifetime does not cover origin");
       const receipt = JSON.parse(readFileSync(path.join(agent.directory, "ngrok.json"), "utf8"));
       validateNgrokReceipt(receipt, agent, service.id, options.port);
-      if (saved?.baseUrl && saved.baseUrl !== receipt.baseUrl) throw new Error("Delivered ngrok URL changed; refusing replacement");
-      const route = { kind: "ngrok", ownedAgent: true, agentId, name: receipt.name, target: receipt.target, baseUrl: receipt.baseUrl };
+      if (JSON.stringify(receipt.account) !== JSON.stringify(verifiedAccount)) throw new Error("Agent configuration differs from the checked account");
+      if (!options.managedResume && options.ngrokAccount && receipt.account?.accountId !== options.ngrokAccount) throw new Error("Agent account mismatch; use explicit switching for legacy or other accounts");
+      if (saved?.baseUrl && !saved.removed && saved.baseUrl !== receipt.baseUrl) throw new Error("Delivered ngrok URL changed; refusing replacement");
+      const route = { kind: "ngrok", ownedAgent: true, agentId, accountId: receipt.account?.accountId || "legacy-unverified", name: receipt.name, target: receipt.target, baseUrl: receipt.baseUrl };
       saveRoute(service, route);
       return { route, agent };
     } catch (error) { lastError = error.message; }
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   throw new Error(`Managed ngrok agent ${agentId} is not ready: ${lastError}; cleanup receipt retained`);
+}
+
+export async function switchNgrokAccount(service, options, ops) {
+  if (!options.switchNgrokFrom || !options.ngrokAccount || options.switchNgrokFrom === options.ngrokAccount) throw new Error("Switch requires distinct explicit old and new account IDs");
+  const account = await ops.check(options.ngrokAccount); // All checks precede stopping anything.
+  const old = await ops.route();
+  if (!old || old.removed || old.kind !== "ngrok" || !old.agentId || (old.accountId || "legacy-unverified") !== options.switchNgrokFrom) throw new Error("Current route does not match the explicitly selected source account");
+  await ops.verify(old);
+  const audit = { originServiceId: service.id, from: options.switchNgrokFrom, to: account.accountId, oldRoute: old, expiresAt: service.expiresAt, requestedAt: new Date().toISOString(), phase: "switching" };
+  await ops.audit(audit);
+  try {
+    await ops.cleanup(); // Only this route’s ownership-verified agent, never the origin.
+    const result = await ops.create();
+    if (result.agent.expiresAt !== service.expiresAt) throw new Error("Replacement must retain the original deadline");
+    const outcome = { ...audit, phase: "ready", newUrl: result.route.baseUrl, urlChanged: old.baseUrl !== result.route.baseUrl };
+    await ops.audit(outcome);
+    return { ...result, switch: outcome };
+  } catch (error) {
+    await ops.audit({ ...audit, phase: "failed", error: "Switch incomplete; inspect the retained route and agent receipts. No automatic rollback or account rotation." });
+    throw error;
+  }
 }
 
 async function main() {
@@ -267,12 +313,15 @@ async function main() {
   }
   const options = parseArgs(process.argv.slice(2));
   if (options.localHost !== "127.0.0.1" && options.localHost !== "localhost") throw new Error("Managed origin must be local loopback");
+  if (options.switchNgrokFrom && (!options.ngrokAccount || options.access !== "ngrok")) throw new Error("Explicit switching requires --access ngrok and --ngrok-account");
   const service = await activeService(options.serviceId, options.port);
+  options.managedResume = !options.switchNgrokFrom && process.env.ON_MOBILE_SERVICE_ID === service.id && process.ppid === service.childPid && service.argv[1] === path.join(path.dirname(scriptPath), "serve-markdown-mobile.mjs");
   const localTarget = `http://127.0.0.1:${options.port}${options.path}`;
   const localProbe = await probeUrl(localTarget, options.timeoutMs);
   if (!localProbe.ok) throw new Error(`Origin probe failed: ${localProbe.error || localProbe.status}`);
   let url, access, expiresAt = service.expiresAt, failure = "";
   const previous = loadRoute(service);
+  if (options.switchNgrokFrom && (!previous || previous.removed || previous.kind !== "ngrok")) throw new Error("Only an existing owned ngrok route can be switched");
   if (previous && !previous.removed) {
     options.access = previous.kind === "ngrok" ? "ngrok" : "tailscale";
     options.preferHttps = previous.kind === "tailscale-serve";
@@ -296,7 +345,24 @@ async function main() {
     if (options.access === "tailscale" || loadRoute(service)?.removed === false || loadRoute(service)?.kind === "tailscale-serve") {
       throw new Error(failure || "Tailscale unavailable; retained any route receipt for scoped cleanup");
     }
-    const result = await withServiceResourceLock(service.id, () => ngrokRouteUnlocked(service, options));
+    const result = await withServiceResourceLock(service.id, () => options.switchNgrokFrom ? switchNgrokAccount(service, options, {
+      check: checkedAccount,
+      route: () => loadRoute(service),
+      verify: async old => {
+        const agent = await activeService(old.agentId, 4040);
+        const receipt = JSON.parse(readFileSync(path.join(agent.directory, "ngrok.json"), "utf8"));
+        validateNgrokReceipt(receipt, agent, service.id, options.port);
+        if ((receipt.account?.accountId || "legacy-unverified") !== options.switchNgrokFrom || receipt.baseUrl !== old.baseUrl) throw new Error("Old agent identity or URL does not match route");
+      },
+      audit: value => {
+        const file = path.join(service.directory, "ngrok-switch.json"), temp = `${file}.${crypto.randomUUID()}.tmp`;
+        writeFileSync(temp, JSON.stringify(value, null, 2), { flag: "wx", mode: 0o600 }); renameSync(temp, file);
+      },
+      cleanup: () => cleanupRouteUnlocked(service),
+      create: () => ngrokRouteUnlocked(service, options),
+    }) : ngrokRouteUnlocked(service, options));
+    if (result.switch) options.switchResult = { from: result.switch.from, to: result.switch.to, oldUrl: result.switch.oldRoute.baseUrl, newUrl: result.switch.newUrl, urlChanged: result.switch.urlChanged };
+    options.actualNgrokAccount = result.route.accountId;
     url = `${result.route.baseUrl}${options.path}`; access = "ngrok";
     expiresAt = new Date(Math.min(Date.parse(expiresAt), Date.parse(result.agent.expiresAt))).toISOString();
   }
@@ -304,10 +370,11 @@ async function main() {
   if (!mobileProbe.ok) throw new Error(`Mobile URL probe failed: ${mobileProbe.error || mobileProbe.status}`);
   await activeService(service.id, options.port);
   const result = { primaryUrl: url, access, visibility: access === "ngrok" ? "public" : "tailnet-only",
+    ngrokAccount: options.actualNgrokAccount, accountSwitch: options.switchResult,
     localTarget, localProbe, mobileProbe, serviceId: service.id, createdAt: service.createdAt, expiresAt,
     cleanupCommand: `bun ${path.join(path.dirname(scriptPath), "mobile-service.mjs")} stop ${service.id}`,
     caveat: "Kept until explicit user completion or expiry. Host power/network/login and tailnet access still matter; sleep does not extend expiry." };
   if (options.json) console.log(JSON.stringify(result, null, 2));
-  else console.log(`Primary URL: ${url}\nAccess: ${result.visibility}\nService: ${service.id}\nExpires: ${expiresAt}\nCleanup after user confirmation: ${result.cleanupCommand}\n${result.caveat}`);
+  else { if (result.accountSwitch) console.log(`Account switch: ${JSON.stringify(result.accountSwitch)}`); console.log(`Primary URL: ${url}\nAccess: ${result.visibility}\nService: ${service.id}\nExpires: ${expiresAt}\nCleanup after user confirmation: ${result.cleanupCommand}\n${result.caveat}`); }
 }
 if (import.meta.main) main().catch(error => { console.error(`Error: ${error.message}`); process.exitCode = 1; });
