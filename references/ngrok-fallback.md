@@ -29,13 +29,13 @@ If ngrok is absent, needs authentication, or cannot resume the same URL, report 
 
 ## Local Account Inventory and Explicit Switching
 
-Account resources belong in `<installed-skill>/.env` (mode `0600`), never in public skill text, tests or release payloads. Use one literal JSON assignment; the helper does not source shell code or interpolate variables:
+Account resources belong in the fixed `~/.config/on-mobile/.env` (mode `0600`, newly created parent directory `0700`), never in public skill text, tests or release payloads. Use one literal JSON assignment; the helper does not source shell code or interpolate variables:
 
 ```dotenv
 ON_MOBILE_NGROK_ACCOUNTS='[{"id":"personal","name":"Example","email":"owner@example.invalid","configPath":"/absolute/private/ngrok.yml","domain":"https://example.invalid","history":"Past observations only; current quota unknown"}]'
 ```
 
-Use an empty `domain` when unknown. Each account needs its own absolute configuration path (no comma-separated config merge). Never copy authtokens or API keys into this file. Existing ngrok config files remain untouched and must be owned regular files with private permissions. The helper suppresses provider stdout/stderr and rejects changed configurations before restart; inspect provider diagnostics locally without pasting secrets if readiness fails.
+Use an empty `domain` when unknown. This path is independent of the skill checkout, installation directory and `CODEX_HOME`. `mobile-ngrok-accounts.mjs location` prints it without showing account details. Missing external inventory is an error; reads never fall back to a stale in-tree `.env`. Each account needs its own absolute configuration path (no comma-separated config merge). Never copy authtokens or API keys into this file. Existing ngrok config files remain untouched and must be owned regular files with private permissions. The helper suppresses provider stdout/stderr and rejects changed configurations before restart; inspect provider diagnostics locally without pasting secrets if readiness fails.
 
 1. Run `bun <skill>/scripts/mobile-ngrok-accounts.mjs list`. It shows local identities, historical notes, recorded checks, and live managed-agent ownership. It does not query live provider quota or claim unmanaged agents belong to this skill.
 2. In the selected account’s dashboard, verify the email/account, its domain, current usage and available quota, and active agent sessions. Inspect local listeners too. Do not infer identity from a filename, a working URL, or the token’s shape. A past limit error is historical; quotas can reset. Unknown/exhausted quota stops new creation or switching; investigate or use the provider’s legitimate upgrade/reset process, never automatic account rotation.
@@ -67,7 +67,20 @@ Report `accountSwitch.oldUrl`, `newUrl`, `urlChanged`, origin ID and unchanged e
 
 ### Installation and upgrade preservation
 
-Before replacing an installation, back up the whole old tree outside skill discovery, including local `.env`, `.local/` and generated UI metadata. Publish from an explicit committed version: packages exclude `.env*`, `.local/`, generated `agents/openai.yaml` and all Git storage. Scan the package for real account identifiers and credentials before publication. Install only the downloaded, checksum-verified version. Restore local `.env` with mode `0600` and `.local/` from the backup, then run `mobile-mode.mjs get` to regenerate UI metadata. Verify release payload separately from these explicitly restored local files. Never upload local resources as release assets or replace protected ngrok config files.
+The external `~/.config/on-mobile/.env` is user-owned configuration, not part of any skill payload. Upgrading or reinstalling the skill replaces only the selected skill tree; never initialize, overwrite, restore over, or delete this external file as an installation step. Deleting the external configuration or the whole home directory is outside this guarantee. Keep a separate private backup for recovery.
+
+For a legacy in-tree inventory, first back up the old installation outside skill discovery and then run the new helper:
+
+```bash
+bun <new-skill>/scripts/mobile-ngrok-accounts.mjs migrate --from /absolute/old-skill/.env
+bun <new-skill>/scripts/mobile-ngrok-accounts.mjs location
+```
+
+Migration validates the source, atomically creates the fixed external file without overwriting, verifies exact bytes and enforces private permissions. An identical destination is accepted unchanged; a different destination, link or insecure file is rejected with both copies retained. It prints only the destination, account count and migration status, never account values. The source stays intact for rollback. After the new installed helper successfully reads the external inventory and you verify its bytes against the backup, remove legacy in-tree copies; do not merge divergent copies or silently prefer one.
+
+Publish from an explicit committed version: packages exclude `.env*`, `.local/`, generated `agents/openai.yaml` and all Git storage. Scan for real account identifiers and credentials before publication. Download and verify the published release, then replace only the skill installation. Preserve `.local/` and regenerate mode UI metadata with `mobile-mode.mjs get`; quota observations in `.local/` remain time-limited observations, not current provider data. Verify payload files separately from restored mode state, and verify the external inventory's bytes and permissions remain unchanged. Do not copy the external `.env` back into the installation or publish it as a release asset. Never replace protected ngrok configuration files.
+
+A reinstall regression test must remove/recreate an isolated entire skill directory and show that the same external account inventory is still read, even if a stale `.env` appears in that new skill directory or `CODEX_HOME` changes.
 
 Official references: [agent configuration and environment precedence](https://ngrok.com/docs/gateway/agent/config/), [current usage](https://dashboard.ngrok.com/usage), [free-plan limits](https://ngrok.com/docs/pricing-limits/free-plan-limits/).
 

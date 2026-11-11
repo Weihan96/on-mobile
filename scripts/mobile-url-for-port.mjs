@@ -31,7 +31,7 @@ Options:
   --https                 Prefer Tailscale Serve HTTPS instead of direct HTTP.
   --local-host <host>     Local host to probe and expose. Defaults to 127.0.0.1.
   --timeout <ms>          Probe timeout. Defaults to 5000.
-  --ngrok-account <id>    Account from the local .env inventory (new tunnels).
+  --ngrok-account <id>    Account from ~/.config/on-mobile/.env (new tunnels).
   --switch-ngrok-from <id> Explicitly replace only this origin’s ngrok agent; use legacy-unverified for a verified legacy agent.
   --json                  Print machine-readable JSON only.
 `);

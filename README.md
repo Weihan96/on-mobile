@@ -48,9 +48,18 @@ Use the bundled `mobile-delivery.mjs` for allowlisted MP4s, pages, assets and li
 
 ### Private ngrok accounts
 
-Keep the local account inventory in the installation’s ignored `.env`; credentials remain in the existing protected ngrok configuration files. Run `mobile-ngrok-accounts.mjs list`, verify the selected dashboard identity/current quota, record that observation with `check`, and pass `--ngrok-account ID` to the URL or Markdown helper. Changing an existing tunnel also requires `--switch-ngrok-from OLD_ID`. Only its owned agent is replaced; the origin and original deadline are retained. No automatic account rotation. See [account checks and switching](references/ngrok-fallback.md).
+Keep the local account inventory at `~/.config/on-mobile/.env`, outside the installation; credentials remain in the existing protected ngrok configuration files. Run `mobile-ngrok-accounts.mjs list`, verify the selected dashboard identity/current quota, record that observation with `check`, and pass `--ngrok-account ID` to the URL or Markdown helper. Changing an existing tunnel also requires `--switch-ngrok-from OLD_ID`. Only its owned agent is replaced; the origin and original deadline are retained. No automatic account rotation. See [account checks and switching](references/ngrok-fallback.md).
 
-Release upgrades must preserve `.env`, `.local/` and mode preferences outside skill discovery before replacement. Download an explicit release, verify its published checksum, inspect/extract it safely, then restore local resources and regenerate UI metadata with `mobile-mode.mjs get`. Those private files are not release assets.
+Replacing or deleting the skill installation does not touch the external account inventory. Keep `.local/` mode preferences separately backed up when upgrading. Download an explicit release, verify its published checksum, inspect/extract it safely, then restore mode preferences and regenerate UI metadata with `mobile-mode.mjs get`. Those private files are not release assets.
+
+For upgrades from the old in-tree inventory, run the new helper before removing the old installation:
+
+```bash
+bun <new-skill>/scripts/mobile-ngrok-accounts.mjs migrate --from /absolute/old-skill/.env
+bun <new-skill>/scripts/mobile-ngrok-accounts.mjs location
+```
+
+Migration preserves exact bytes, creates a private `0600` file, and refuses to overwrite a different destination. It retains the source until you have verified the new installation; then remove the old in-tree copy after backing it up. Normal reads never fall back to an in-tree `.env`.
 
 ### Limits and troubleshooting
 
@@ -85,6 +94,8 @@ Tests cover fixed expiry, ownership, cleanup retries, crash-safe locks and pinne
 默认优先私有 Tailscale 链接；必要时使用公网 ngrok。源服务和隧道均由系统管理。用户明确确认用完才提前回收，否则创建满七天关闭；访问、播放完成、任务结束或重启都不续期。不会删除交付文件或关闭其他任务的服务。
 
 电脑仍须唤醒、联网并登录，daemon 不代表离线也能访问。ngrok 是公网服务，受账号与平台限制。端口占用时换空闲端口，不杀别人的进程；后台无法读 Documents 时，将交付内容放到稳定的 `~/.codex/mobile-previews/` 子目录；手机无法连接时检查 Tailscale/VPN；回收失败时查看日志并重试，不重置共享路由。
+
+账号清单固定保存在 `~/.config/on-mobile/.env`，与技能安装目录分离；只替换技能目录不会覆盖它。旧版本按上方 `migrate --from` 命令迁移，同内容可重复执行，不同内容会停止且不覆盖。确认新安装读取成功并保留备份后，再删除旧目录里的清单。
 
 新增的恢复工具支持明确白名单中的视频、图册与链接汇总，检查真实文件、编码、分段响应及共享入口归属。恢复必须继承原截止时间；受支持的交付网关可添加独立子路径，回收时保留其他入口。既有自定义服务器须先验证迁移方案，当前可访问不代表共享代理重启后同一地址一定恢复。详见上方恢复文档。
 

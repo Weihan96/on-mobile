@@ -1,11 +1,16 @@
 #!/usr/bin/env bun
-import { readInventory, readChecks, recordCheck } from './lib/ngrok-accounts.mjs';
+import { readInventory, readChecks, recordCheck, migrateInventory, inventoryFile } from './lib/ngrok-accounts.mjs';
 import { createManager } from './mobile-service.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 async function main() {
   const [command, id, ...args] = process.argv.slice(2);
-  if (command === 'list') {
+  if (command === 'location') {
+    console.log(inventoryFile);
+  } else if (command === 'migrate') {
+    if (id !== '--from' || args.length !== 1) throw new Error('migrate --from ABS_OLD_ENV');
+    console.log(JSON.stringify(await migrateInventory(args[0]), null, 2));
+  } else if (command === 'list') {
     const accounts = await readInventory(), checks = await readChecks();
     const services = await createManager().list(), agents = [];
     for (const s of services.filter(s => s.status !== 'closed')) {
@@ -20,6 +25,6 @@ async function main() {
     if (!account) throw new Error('Unknown account ID');
     const result = await recordCheck(account, { identity: args[1], quota: args[3], source: args[5] });
     console.log(JSON.stringify({ accountId: id, quota: result.quota, checkedAt: result.checkedAt }));
-  } else throw new Error('Usage: mobile-ngrok-accounts.mjs list | check ID --identity EMAIL --quota available|exhausted|unknown --source dashboard');
+  } else throw new Error('Usage: mobile-ngrok-accounts.mjs location | migrate --from ABS_OLD_ENV | list | check ID --identity EMAIL --quota available|exhausted|unknown --source dashboard');
 }
 if (import.meta.main) main().catch(e => { console.error(e.message); process.exitCode = 1; });

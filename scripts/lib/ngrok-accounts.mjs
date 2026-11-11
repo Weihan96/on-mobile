@@ -2,9 +2,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
+import { constants } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-export const inventoryFile = path.join(root, '.env');
+// Keep account resources independent of replaceable skill trees and CODEX_HOME.
+export const inventoryFile = path.join(os.homedir(), '.config/on-mobile/.env');
 export const checksFile = path.join(root, '.local/ngrok-checks.json');
 const ensure = (v, m) => { if (!v) throw new Error(m); };
 const keys = ['id', 'name', 'email', 'configPath', 'domain', 'history'];
@@ -26,9 +29,43 @@ export function parseInventory(text) {
   }
   return accounts;
 }
+async function privateInventoryBytes(file) {
+  const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = await handle.stat();
+    ensure(stat.isFile() && stat.uid === process.getuid() && !(stat.mode & 0o077), 'Account inventory must be an owned private regular file (0600), not a link');
+    return await handle.readFile();
+  } finally { await handle.close(); }
+}
 export async function readInventory(file = inventoryFile) {
-  try { return parseInventory(await fs.readFile(file, 'utf8')); }
-  catch (e) { if (e.code === 'ENOENT') throw new Error('No local .env account inventory; see references/ngrok-fallback.md'); throw e; }
+  try { return parseInventory((await privateInventoryBytes(file)).toString('utf8')); }
+  catch (e) { if (e.code === 'ENOENT') throw new Error('No account inventory at ~/.config/on-mobile/.env; migrate the old .env with mobile-ngrok-accounts.mjs migrate --from ABS_OLD_ENV'); throw e; }
+}
+export async function migrateInventory(source, destination = inventoryFile) {
+  ensure(path.isAbsolute(source) && path.isAbsolute(destination), 'Migration requires absolute file paths');
+  const bytes = await privateInventoryBytes(source);
+  const accounts = parseInventory(bytes.toString('utf8'));
+  // Reject existing directory links before creating anything in the fixed location.
+  for (let p = path.dirname(destination); ; p = path.dirname(p)) {
+    try { const stat = await fs.lstat(p); ensure(stat.isDirectory() && !stat.isSymbolicLink(), 'Account config directory must not traverse links'); }
+    catch (e) { if (e.code !== 'ENOENT') throw e; }
+    if (p === path.dirname(p)) break;
+  }
+  await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  const existing = async () => {
+    ensure(bytes.equals(await privateInventoryBytes(destination)), 'External account inventory differs; retained both files without overwriting. Review explicitly before combining.');
+    return { destination, accountCount: accounts.length, status: 'already-present', sourceRetained: true };
+  };
+  const temp = path.join(path.dirname(destination), `.migration-${crypto.randomUUID()}.tmp`);
+  try {
+    const handle = await fs.open(temp, 'wx', 0o600);
+    try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+    // Atomic no-clobber publication: a concurrent migration cannot replace a file.
+    try { await fs.link(temp, destination); }
+    catch (e) { if (e.code === 'EEXIST') return await existing(); throw e; }
+    ensure(bytes.equals(await privateInventoryBytes(destination)), 'Migration verification failed; source retained');
+    return { destination, accountCount: accounts.length, status: 'migrated', sourceRetained: true };
+  } finally { await fs.rm(temp, { force: true }); }
 }
 export async function configFingerprint(file) {
   const stat = await fs.lstat(file);

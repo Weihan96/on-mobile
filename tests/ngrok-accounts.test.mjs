@@ -10,7 +10,7 @@ beforeEach(async () => {
   account = { id: 'fixture', name: 'Fixture', email: 'test@example.invalid', configPath: path.join(dir, 'agent.yml'), domain: 'https://fixture.example.invalid', history: 'Past observation only' };
   await fs.writeFile(account.configPath, 'version: 3\n', { mode: 0o600 });
   inventory = path.join(dir, '.env'); checks = path.join(dir, 'checks.json');
-  await fs.writeFile(inventory, `ON_MOBILE_NGROK_ACCOUNTS='${JSON.stringify([account])}'\n`);
+  await fs.writeFile(inventory, `ON_MOBILE_NGROK_ACCOUNTS='${JSON.stringify([account])}'\n`, { mode: 0o600 });
 });
 afterEach(async () => fs.rm(dir, { recursive: true, force: true }));
 test('inventory accepts literal paths without shell evaluation and rejects credential keys or duplicate configs', () => {
