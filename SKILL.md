@@ -32,7 +32,15 @@ Modes:
 
 If the mode file is missing or invalid, treat the mode as `auto`.
 
-The helper stores mode state inside this skill's gitignored `.local/` directory and renders `agents/openai.yaml` from `agents/openai.yaml.template` so the Codex UI metadata can show the current mode without making `SKILL.md` dirty. Do not hand-edit the generated `agents/openai.yaml`.
+The helper stores the preference at the fixed `~/.config/on-mobile/mobile-preview-mode`, outside every skill checkout and installation. This location is independent of `CODEX_HOME` and the legacy `CODEX_MOBILE_PREVIEW_MODE_FILE` override. Upgrading or reinstalling only the skill directory must leave the preference untouched. The helper renders replaceable `agents/openai.yaml` from `agents/openai.yaml.template`; run `get` after installation to regenerate the current badge without changing the preference. Do not hand-edit either state or generated metadata.
+
+For an older skill-local preference, back up the old installation and migrate before replacing it:
+
+```bash
+bun <new-skill>/scripts/mobile-mode.mjs migrate --from /absolute/old-skill/.local/mobile-preview-mode --json
+```
+
+Migration retains the source, creates the external preference with private permissions, and refuses to overwrite a different existing value. Invalid legacy input stops migration instead of silently choosing `auto`. Verify the new installed helper reads the original mode, then retire the old copy; keep backups outside skill discovery.
 
 Generated UI metadata uses an emoji badge such as `📱 auto`, `🟢 always`, or `⚪ off` so the mobile skill chip is easier to scan. Codex App may cache skill metadata; if the chip still shows the old mode, tell the user to restart or reload Codex App.
 
@@ -142,7 +150,7 @@ Read `references/markdown-preview.md` for Markserv installation policy, Codex mo
 
 Use ngrok only when Tailscale is unavailable, insufficient, explicitly requested, or the task needs a public internet URL.
 
-Before ngrok use, read the fixed `~/.config/on-mobile/.env` inventory with `mobile-ngrok-accounts.mjs list`, verify the selected dashboard identity and current quota, and inspect existing agents and ownership. Account changes require the user’s explicit selection; never rotate accounts automatically or use switching to evade provider quotas. Keep all account names, emails, domains and configuration paths in `~/.config/on-mobile/.env` outside every skill installation/development tree, excluded from Git and releases; credentials stay in the existing protected ngrok config. Skill reinstallations must leave that external inventory untouched. For an older in-tree `.env`, use the explicit no-overwrite migration in the ngrok reference before replacing the old installation. Preserve `.local/` separately for mode preferences.
+Before ngrok use, read the fixed `~/.config/on-mobile/.env` inventory with `mobile-ngrok-accounts.mjs list`, verify the selected dashboard identity and current quota, and inspect existing agents and ownership. Account changes require the user’s explicit selection; never rotate accounts automatically or use switching to evade provider quotas. Keep all account names, emails, domains and configuration paths in `~/.config/on-mobile/.env` outside every skill installation/development tree, excluded from Git and releases; credentials stay in the existing protected ngrok config. Skill reinstallations must leave that external inventory untouched. For an older in-tree `.env`, use the explicit no-overwrite migration in the ngrok reference before replacing the old installation. The mobile-mode preference is also external; regenerate its replaceable UI metadata after installation.
 
 Read `references/ngrok-fallback.md` before using ngrok. That reference covers tunnel discovery, warning-page behavior, public URL reporting, interaction validation over ngrok, and the known IPv6/EOF workaround.
 

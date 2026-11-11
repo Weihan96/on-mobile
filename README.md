@@ -46,11 +46,24 @@ The skill prefers private Tailscale URLs and uses ngrok when public access is re
 
 Use the bundled `mobile-delivery.mjs` for allowlisted MP4s, pages, assets and link indexes, and `mobile-links.mjs` to audit files, video bytes/codecs and existing transports. Restored services use `mobile-service.mjs start ... --inherit ORIGINAL_ID` to retain their original deadline. Supported delivery gateways can add and remove owned subpaths while preserving other routes; arbitrary existing servers require a reviewed migration. See [recovery configuration and verification](references/delivery-recovery.md).
 
+### Persistent mobile mode
+
+`off`, `auto` and `always` are saved at `~/.config/on-mobile/mobile-preview-mode`, independent of the skill installation and `CODEX_HOME`. Existing `set`/`get` commands remain the supported way to change/read the preference; `on` remains an alias for `always`. Missing or invalid state reports `auto` without overwriting a saved file.
+
+Before replacing an older installation with a skill-local preference, use the new helper:
+
+```bash
+bun <new-skill>/scripts/mobile-mode.mjs migrate --from /absolute/old-skill/.local/mobile-preview-mode --json
+bun <new-skill>/scripts/mobile-mode.mjs get --json
+```
+
+Migration retains the old file for rollback, accepts an identical preference, and stops if the external preference differs. After the installed helper reads the expected mode, retire the old in-tree copy and keep its backup. Reinstallations regenerate `agents/openai.yaml` from the saved mode; that generated badge is not the source of truth. If Codex still shows an older badge, reload the app. The old `CODEX_MOBILE_PREVIEW_MODE_FILE` override no longer relocates the preference.
+
 ### Private ngrok accounts
 
 Keep the local account inventory at `~/.config/on-mobile/.env`, outside the installation; credentials remain in the existing protected ngrok configuration files. Run `mobile-ngrok-accounts.mjs list`, verify the selected dashboard identity/current quota, record that observation with `check`, and pass `--ngrok-account ID` to the URL or Markdown helper. Changing an existing tunnel also requires `--switch-ngrok-from OLD_ID`. Only its owned agent is replaced; the origin and original deadline are retained. No automatic account rotation. See [account checks and switching](references/ngrok-fallback.md).
 
-Replacing or deleting the skill installation does not touch the external account inventory. Keep `.local/` mode preferences separately backed up when upgrading. Download an explicit release, verify its published checksum, inspect/extract it safely, then restore mode preferences and regenerate UI metadata with `mobile-mode.mjs get`. Those private files are not release assets.
+Replacing or deleting only the skill installation touches neither the external account inventory nor the mode preference at `~/.config/on-mobile/mobile-preview-mode`. Download an explicit release, verify its published checksum, inspect/extract it safely, then regenerate UI metadata with `mobile-mode.mjs get`; this reads the saved preference without resetting it. Those private files are not release assets.
 
 For upgrades from the old in-tree inventory, run the new helper before removing the old installation:
 
@@ -94,6 +107,8 @@ Tests cover fixed expiry, ownership, cleanup retries, crash-safe locks and pinne
 默认优先私有 Tailscale 链接；必要时使用公网 ngrok。源服务和隧道均由系统管理。用户明确确认用完才提前回收，否则创建满七天关闭；访问、播放完成、任务结束或重启都不续期。不会删除交付文件或关闭其他任务的服务。
 
 电脑仍须唤醒、联网并登录，daemon 不代表离线也能访问。ngrok 是公网服务，受账号与平台限制。端口占用时换空闲端口，不杀别人的进程；后台无法读 Documents 时，将交付内容放到稳定的 `~/.codex/mobile-previews/` 子目录；手机无法连接时检查 Tailscale/VPN；回收失败时查看日志并重试，不重置共享路由。
+
+手机模式偏好固定保存在 `~/.config/on-mobile/mobile-preview-mode`；升级或重装只替换技能目录，不会重置 `off/auto/always`。旧版本用上方 `mobile-mode.mjs migrate --from` 迁移，遇到不同的已存偏好会停止，不会覆盖。安装后运行 `get` 从已存偏好重新生成界面徽标；若显示仍旧，重新加载 Codex App。
 
 账号清单固定保存在 `~/.config/on-mobile/.env`，与技能安装目录分离；只替换技能目录不会覆盖它。旧版本按上方 `migrate --from` 命令迁移，同内容可重复执行，不同内容会停止且不覆盖。确认新安装读取成功并保留备份后，再删除旧目录里的清单。
 
