@@ -6,7 +6,7 @@ import { parseInventory, recordCheck, checkedAccount, validateBinding } from '..
 import { switchNgrokAccount } from '../scripts/mobile-url-for-port.mjs';
 let dir, account, inventory, checks;
 beforeEach(async () => {
-  dir = await fs.mkdtemp(path.join(os.tmpdir(), 'account-check-'));
+  dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'account-check-')));
   account = { id: 'fixture', name: 'Fixture', email: 'test@example.invalid', configPath: path.join(dir, 'agent.yml'), domain: 'https://fixture.example.invalid', history: 'Past observation only' };
   await fs.writeFile(account.configPath, 'version: 3\n', { mode: 0o600 });
   inventory = path.join(dir, '.env'); checks = path.join(dir, 'checks.json');

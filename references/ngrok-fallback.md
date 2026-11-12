@@ -27,62 +27,104 @@ The agent launches its tunnel as part of its foreground command, persists the fi
 
 If ngrok is absent, needs authentication, or cannot resume the same URL, report the concrete blocker. Never put authentication tokens in service command arguments, receipts or logs; use ngrok's existing protected configuration. An API-created temporary tunnel under `ngrok start --none` is insufficient: it disappears when the agent restarts.
 
-## Local Account Inventory and Explicit Switching
+## Accounts, quota evidence and bounded rotation
 
-Account resources belong in the fixed `~/.config/on-mobile/.env` (mode `0600`, newly created parent directory `0700`), never in public skill text, tests or release payloads. Use one literal JSON assignment; the helper does not source shell code or interpolate variables:
+All account resources live under `~/.config/on-mobile/`, independently of `CODEX_HOME` and the replaceable skill installation:
+
+| File | Purpose |
+|---|---|
+| `.env` | Registered authorized identities and paths to protected ngrok configs |
+| `ngrok-checks.json` | Latest observations with append-preserved history |
+| `ngrok-rotation.json` | Enabled pool in priority order and service/chat grants |
+| `rotation-lock/.lockfile` | Kernel-released cross-process rotation lock |
+
+Files are private `0600`; new directories are `0700`. Credentials remain exclusively in owned private ngrok configs, never in these records, command arguments, logs, tests or releases. Do not read tokens into the conversation. `list` is a local inventory/evidence report, **not a live quota API**. It also lists managed agents, but does not establish ownership of unmanaged processes.
+
+The inventory retains its existing literal JSON schema (no shell evaluation):
 
 ```dotenv
-ON_MOBILE_NGROK_ACCOUNTS='[{"id":"personal","name":"Example","email":"owner@example.invalid","configPath":"/absolute/private/ngrok.yml","domain":"https://example.invalid","history":"Past observations only; current quota unknown"}]'
+ON_MOBILE_NGROK_ACCOUNTS='[{"id":"personal","name":"Example","email":"owner@example.invalid","configPath":"/absolute/private/ngrok.yml","domain":"https://example.invalid","history":"Past observation only; current quota unknown"}]'
 ```
 
-Use an empty `domain` when unknown. This path is independent of the skill checkout, installation directory and `CODEX_HOME`. `mobile-ngrok-accounts.mjs location` prints it without showing account details. Missing external inventory is an error; reads never fall back to a stale in-tree `.env`. Each account needs its own absolute configuration path (no comma-separated config merge). Never copy authtokens or API keys into this file. Existing ngrok config files remain untouched and must be owned regular files with private permissions. The helper suppresses provider stdout/stderr and rejects changed configurations before restart; inspect provider diagnostics locally without pasting secrets if readiness fails.
+Use an empty domain when unknown. Register only completed accounts with a distinct protected config; pending signup is not a registered/available account. Keep unfinished registrations outside this usable pool until the user-requested registration is actually complete. Do not auto-create accounts or bypass membership/verification restrictions.
 
-1. Run `bun <skill>/scripts/mobile-ngrok-accounts.mjs list`. It shows local identities, historical notes, recorded checks, and live managed-agent ownership. It does not query live provider quota or claim unmanaged agents belong to this skill.
-2. In the selected account’s dashboard, verify the email/account, its domain, current usage and available quota, and active agent sessions. Inspect local listeners too. Do not infer identity from a filename, a working URL, or the token’s shape. A past limit error is historical; quotas can reset. Unknown/exhausted quota stops new creation or switching; investigate or use the provider’s legitimate upgrade/reset process, never automatic account rotation.
-3. After actually observing that dashboard, record it:
+### Recording quota
+
+Check the actual account identity, domain, usage and active sessions in its dashboard before recording `available`. Official ordinary tunnel documentation points to the dashboard; no verified public monthly-quota API adapter is implemented. Do not substitute tunnel metrics or the separate AI Gateway API for account monthly allowance. If an official quota interface becomes available, verify its identity and reset semantics before adding an adapter.
 
 ```bash
-bun <skill>/scripts/mobile-ngrok-accounts.mjs check ACCOUNT_ID --identity ACCOUNT_EMAIL --quota available --source dashboard
+bun <skill>/scripts/mobile-ngrok-accounts.mjs list
+bun <skill>/scripts/mobile-ngrok-accounts.mjs check ACCOUNT_ID --identity ACCOUNT_EMAIL --quota available --source dashboard --used-bytes 1000 --limit-bytes 1000000000
 ```
 
-`unknown` and `exhausted` can also be recorded but do not authorize use. The record binds the exact configuration bytes to the identity and expires after 30 minutes. It is a local observation, not a live quota API. Never fabricate an available check to make a command pass. Restarts of an already owned agent preserve the binding and original deadline without requiring a new manual check on each restart. A managed Markdown origin also resumes its persisted route after restart; after an explicit switch, that route’s current binding takes precedence over the original account argument. This internal resume path requires the actual managed Markdown parent process and still verifies the binding/configuration, listener ownership and pinned URL.
+Only include numerical usage/limits actually shown. Omitted fields remain null. Additional optional flags:
 
-4. For a new tunnel, choose the account explicitly:
+| Flag / field | Meaning |
+|---|---|
+| `--checked-at ISO` / `checkedAt` | Actual observation time, defaults to now; cannot be in the future |
+| `recordedAt` | Time this observation was written, distinct from the observation itself |
+| `--cycle-start ISO`, `--cycle-end ISO` | Observed billing period, not an inferred allowance |
+| `--provider-reset-at ISO` | Exact provider-confirmed reset instant, with timezone |
+| `--estimated-reset-at ISO` | Explicitly estimated reset instant, never confirmation |
+| `estimatedResetDate` | Next month first day from observation, date-only; exact reset time/timezone unverified |
+| `restoredAt` | First confirmed recovery in the latest exhaustion/recovery cycle; later checks retain it |
+| `source`, `errorCode`, `configHash`, `history` | Auditable source, classified provider error, exact bound config and previous observations |
+
+ngrok's pricing page says usage refreshes on the first of each month; the free-plan page describes monthly billing cycles. Use next month first day as an estimate when account-specific reset details are unavailable, not a guaranteed midnight in the user's timezone. Reaching either provider/estimated reset time means **recheck due**, never automatic `available`.
+
+A fresh `available` observation is accepted for 30 minutes only, bound to exact email and config bytes. Stale evidence is displayed as current `unknown` with the historical observation retained. `unknown`/`exhausted` never qualify. `user-report` can record unknown/exhausted historical handoffs but cannot establish available. `provider-error` accepts only `ERR_NGROK_725` with exhausted status. Other errors—including auth, registration, concurrency, network and ordinary HTTP 403—must not be classified as monthly exhaustion. Success of a small URL probe does not establish remaining monthly quota. Automated probes classify only the reserved `ngrok-error-code` response header, never an error-code string in application content. Subsequent error observations retain still-future confirmed reset/cycle metadata and its original evidence time/source.
+
+### Enabling automatic mode
+
+User authorization to automatically choose from a named pool is sufficient for repeated switches within that pool and service; do not demand fresh confirmation for each switch. Default is off. Configure and inspect it with:
+
+```bash
+bun <skill>/scripts/mobile-ngrok-accounts.mjs rotation on --accounts primary,backup
+bun <skill>/scripts/mobile-ngrok-accounts.mjs rotation status
+bun <skill>/scripts/mobile-ngrok-accounts.mjs candidates
+bun <skill>/scripts/mobile-ngrok-accounts.mjs authorize ORIGIN_ID
+bun <skill>/scripts/mobile-url-for-port.mjs PORT --service ORIGIN_ID --access ngrok --ngrok-auto --json
+bun <skill>/scripts/mobile-ngrok-accounts.mjs rotation off
+```
+
+`authorize` binds one running origin and its unchanged expiry to the current `CODEX_THREAD_ID`; new services also record their originating chat. Never authorize a service merely because it belongs to the same OS user. For a legacy service lacking a chat owner, establish ownership from its existing delivery evidence first. Do not enroll other chats' origins. A background Markdown resume preserves its saved account and URL; it does not switch accounts without this chat-bound invocation.
+
+This mode runs **when the URL helper is invoked**. It does not install a watcher, poll all accounts, log into dashboards, or promise failover after the invocation finishes. It retains a healthy current route. On a new route it chooses the first eligible pool account; on an owned route with confirmed 725 it records exhaustion and chooses another fresh verified candidate. Unknown, stale, exhausted, reset-due, changed-config and missing accounts are skipped. Every candidate is attempted at most once, in configured priority order. A non-quota failure stops immediately; an empty eligible pool leaves the existing route untouched. `rotation off` prevents subsequent automatic runs and leaves current services running.
+
+Service locks protect ownership and the global rotation lock serializes ngrok creation/switching across chats, including manual operations. Lock acquisition times out after ten seconds; kernel ownership ends on process exit. Port 4040 remains exclusive. Never kill its unrelated listener to free it.
+
+### Manual switching and failure recovery
+
+Manual selection remains supported:
 
 ```bash
 bun <skill>/scripts/mobile-url-for-port.mjs PORT --service ORIGIN_ID --access ngrok --ngrok-account ACCOUNT_ID --json
-```
-
-The wrapper passes exactly that `--config`, strips `NGROK_*` environment overrides, pins the account’s domain (or first acquired URL), verifies ownership and reconnects to the same URL before reporting ready. No default configuration is overwritten. Port 4040 remains exclusive; an unrelated listener is a blocker, never a reason to kill another process.
-
-5. To change an existing tunnel, first show the user the origin ID, old/new identities, current quota observations, old URL and expected new domain (or unknown), original expiry and likely brief interruption. Only after the user explicitly selects the change:
-
-```bash
 bun <skill>/scripts/mobile-url-for-port.mjs PORT --service ORIGIN_ID --access ngrok --ngrok-account NEW_ID --switch-ngrok-from OLD_ID --json
 ```
 
-The helper verifies the exact old agent/receipt/listener, records the switch intent, stops only that agent, and starts a replacement inheriting the origin’s original deadline. It leaves the origin and other services running. Legacy receipts are identified as `legacy-unverified`; migrating one requires that exact source ID plus manual dashboard ownership checks. A mismatched account, unrelated route, inactive origin, stale quota check or occupied API port must not trigger a broader cleanup.
+The wrapper uses exactly the bound protected `--config`, removes `NGROK_*` environment overrides, and tests reconnect to its pinned account domain before readiness. The account's domain can differ from the old account's domain. Report actual old/new URLs, `urlChanged`, origin and agent IDs, unchanged expiry, and quota evidence freshness. Never say the address stayed the same without comparing it.
 
-Report `accountSwitch.oldUrl`, `newUrl`, `urlChanged`, origin ID and unchanged expiry. If replacement fails, report the interruption; retain `ngrok-switch.json`, route and agent receipts for inspection. Do not claim success, rotate accounts, or silently restore another identity. A partial new agent can be inspected and completed with the normal URL command after fresh checks, or explicitly cleaned up; do not blindly rerun a switch against the old account.
+Before stopping an agent, verify its exact origin argv, listener, binding and receipt. Replacement inherits the original deadline; the origin is not restarted. Automatic transactions retain `ngrok-rotation-UUID.json` in the external service directory: old route, candidates skipped/attempted, probes, replacement IDs/URLs, expiry and success/failure. Explicit switches retain `ngrok-switch.json`. No raw provider response bodies are logged.
+
+A failed replacement can leave the old agent closed and a partial/new agent running. The audit says `restored: false`; this is not successful rollback. Keep all receipts and report the interruption. Inspect current route and actual agent/listener ownership; clean up only the partial agent using the scoped route cleanup, then explicitly select the recovered original or another freshly verified account. For a closed original account, this creates a new owned agent with the original expiry and pinned configured domain; verify the actual old URL was recovered before reporting restoration. Do not restore an exhausted account automatically, retry an ambiguous partial bootstrap, or resume a transaction after a process crash without examining its evidence.
+
+`ERR_NGROK_4013` blocks new account creation when already a member of a free account. Stop at that provider restriction; do not fabricate identities, automate registration pools or defeat verification. Authorized management of existing accounts does not imply permission to evade provider enforcement.
 
 ### Installation and upgrade preservation
 
-The external `~/.config/on-mobile/.env` is user-owned configuration, not part of any skill payload. Upgrading or reinstalling the skill replaces only the selected skill tree; never initialize, overwrite, restore over, or delete this external file as an installation step. Deleting the external configuration or the whole home directory is outside this guarantee. Keep a separate private backup for recovery.
-
-For a legacy in-tree inventory, first back up the old installation outside skill discovery and then run the new helper:
+Back up the old installation outside skill discovery. Migrate legacy data with the new helper before replacement:
 
 ```bash
 bun <new-skill>/scripts/mobile-ngrok-accounts.mjs migrate --from /absolute/old-skill/.env
+bun <new-skill>/scripts/mobile-ngrok-accounts.mjs migrate-checks --from /absolute/old-skill/.local/ngrok-checks.json
 bun <new-skill>/scripts/mobile-ngrok-accounts.mjs location
 ```
 
-Migration validates the source, atomically creates the fixed external file without overwriting, verifies exact bytes and enforces private permissions. An identical destination is accepted unchanged; a different destination, link or insecure file is rejected with both copies retained. It prints only the destination, account count and migration status, never account values. The source stays intact for rollback. After the new installed helper successfully reads the external inventory and you verify its bytes against the backup, remove legacy in-tree copies; do not merge divergent copies or silently prefer one.
+Inventory migration is atomic/no-overwrite; divergent destinations require review. Check migration retains source, original observation time and any newer destination record; it never turns old checks fresh. Reinstallation must not initialize, overwrite or remove the external inventory, quota history, rotation grants, mode preference or service runtime receipts. Tests replace an isolated whole skill tree and change `CODEX_HOME` to verify preservation.
 
-Publish from an explicit committed version: packages exclude `.env*`, `.local/`, generated `agents/openai.yaml` and all Git storage. Scan for real account identifiers and credentials before publication. Download and verify the published release, then replace only the skill installation. The mode preference is separately stored at `~/.config/on-mobile/mobile-preview-mode`; leave it untouched and regenerate mode UI metadata with `mobile-mode.mjs get`. For a legacy skill-local mode, use the explicit migration in `SKILL.md` before replacement. Quota observations in `.local/` remain time-limited observations, not current provider data. Verify payload files separately from generated UI metadata, and verify both external configuration files remain unchanged. Do not copy the external `.env` back into the installation or publish it as a release asset. Never replace protected ngrok configuration files.
+Publish only an authorized immutable release, excluding `.env*`, `.local/`, generated UI metadata, personal accounts, tokens and Git storage. Install the verified downloaded package, retain rollback backup, regenerate mode UI with `mobile-mode.mjs get`, and verify external state bytes are unchanged. Never copy account records back into the skill tree or replace protected ngrok configs.
 
-A reinstall regression test must remove/recreate an isolated entire skill directory and show that the same external account inventory is still read, even if a stale `.env` appears in that new skill directory or `CODEX_HOME` changes.
-
-Official references: [agent configuration and environment precedence](https://ngrok.com/docs/gateway/agent/config/), [current usage](https://dashboard.ngrok.com/usage), [free-plan limits](https://ngrok.com/docs/pricing-limits/free-plan-limits/).
+Official references: [reserved provider error header](https://ngrok.com/docs/gateway/endpoints/http), [725 monthly exhaustion](https://ngrok.com/docs/errors/err_ngrok_725), [4013 account restriction](https://ngrok.com/docs/errors/err_ngrok_4013), [usage refresh](https://ngrok.com/docs/pricing-limits), [free-plan limits and account-bound domain](https://ngrok.com/docs/pricing-limits/free-plan-limits), [public API reference](https://ngrok.com/docs/api-reference).
 
 ## Markdown Preview Fallback
 

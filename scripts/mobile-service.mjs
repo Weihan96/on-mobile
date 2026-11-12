@@ -29,7 +29,7 @@ async function atomicJSON(file, value) {
   finally { await fs.rm(tmp, { force: true }); }
 }
 let flock;
-async function locked(directory, operation) {
+export async function withDirectoryLock(directory, operation) {
   if (!flock) {
     const { dlopen, FFIType } = await import('bun:ffi');
     flock = dlopen(process.platform === 'darwin' ? '/usr/lib/libSystem.B.dylib' : 'libc.so.6', {
@@ -38,10 +38,12 @@ async function locked(directory, operation) {
   }
   // Never unlink: all contenders must lock the same inode. The kernel releases
   // ownership when this handle closes, including an uncatchable process exit.
-  const handle = await fs.open(path.join(directory, '.lockfile'), 'a', 0o600);
+  const handle = await fs.open(path.join(directory, '.lockfile'), F.O_CREAT | F.O_RDWR | F.O_NOFOLLOW | F.O_NONBLOCK, 0o600);
   const deadline = Date.now() + 10000;
   let acquired = false;
   try {
+    const stat = await handle.stat();
+    ensure(stat.isFile() && stat.uid === process.getuid() && !(stat.mode & 0o077), 'Lock must be an owned private regular file');
     while (flock(handle.fd, 2 | 4) !== 0) {
       ensure(Date.now() < deadline, 'Service state lock busy or unavailable; retry later');
       await pause(50);
@@ -156,14 +158,14 @@ export function createManager(options = {}) {
     const r = await manifest(id);
     const resourceDirectory = shared ? path.join(stateRoot, '.shared-route-coordination') : path.join(r.directory, 'resource-coordination');
     await fs.mkdir(resourceDirectory, { recursive: true, mode: 0o700 });
-    return locked(resourceDirectory, callback);
+    return withDirectoryLock(resourceDirectory, callback);
   }
   async function registerCleanup(id, argv) {
     ensure(Array.isArray(argv) && argv.length > 0 && argv.every(a => typeof a === 'string' && !a.includes('\0')), 'Cleanup requires an argv string array');
     const current = await readService(id);
     ensure(current.status === 'running', 'Cannot register cleanup on an inactive service; immediately reclaim the newly created resource');
     const command = [await executable(argv[0], current.cwd), ...argv.slice(1)];
-    return locked(current.directory, async () => {
+    return withDirectoryLock(current.directory, async () => {
       const live = await runtime(current);
       ensure(live.status === 'running' && !expired(current, now()) && !await exists(path.join(current.directory, 'stop-request.json')), 'Service stopped or expired during registration; reclaim the resource immediately');
       const file = path.join(current.directory, 'cleanup.json');
@@ -176,7 +178,7 @@ export function createManager(options = {}) {
   }
   async function finish(id) {
     const r = await manifest(id);
-    await locked(r.directory, () => writeRuntime(r, { status: 'stopping', workerPid: process.pid }));
+    await withDirectoryLock(r.directory, () => writeRuntime(r, { status: 'stopping', workerPid: process.pid }));
     const file = path.join(r.directory, 'cleanup.json');
     const entries = await exists(file) ? await readJSON(file) : [];
     for (const entry of entries) {
@@ -210,6 +212,7 @@ export function createManager(options = {}) {
     await backend.portAvailable(port);
     const id = crypto.randomUUID(), directory = directoryFor(id), createdAt = new Date(now()).toISOString();
     const r = { version: 1, id, ownerUid: uid, label: LABEL_PREFIX + id, directory, createdAt, expiresAt: expiresAt(createdAt), cwd: await fs.realpath(cwd), port, argv: [await executable(argv[0], cwd), ...argv.slice(1)], bun: await fs.realpath(process.execPath), script: await fs.realpath(SCRIPT), plistPath: path.join(agentsRoot, LABEL_PREFIX + id + '.plist') };
+    r.ownerThreadId = prior?.ownerThreadId || process.env.CODEX_THREAD_ID || null;
     if (prior) { r.version = 2; r.inheritFrom = prior.id; r.expiresAt = new Date(Math.min(Date.parse(r.expiresAt), Date.parse(prior.expiresAt))).toISOString(); }
     await fs.mkdir(directory, { recursive: true, mode: 0o700 }); await fs.mkdir(agentsRoot, { recursive: true });
     await atomicJSON(path.join(directory, 'service.json'), r);
@@ -220,7 +223,7 @@ export function createManager(options = {}) {
   }
   async function stop(id) {
     const r = await manifest(id);
-    await locked(r.directory, () => atomicJSON(path.join(r.directory, 'stop-request.json'), { requestedAt: new Date(now()).toISOString() }));
+    await withDirectoryLock(r.directory, () => atomicJSON(path.join(r.directory, 'stop-request.json'), { requestedAt: new Date(now()).toISOString() }));
     if (!await backend.job(r.label)) await finish(id);
     return readService(id);
   }
@@ -255,7 +258,7 @@ export function createManager(options = {}) {
           // Persist signals too: a worker killed during failed cleanup must never
           // restart its server merely because its original TTL has not elapsed.
           const stopFile = path.join(r.directory, 'stop-request.json');
-          await locked(r.directory, async () => {
+          await withDirectoryLock(r.directory, async () => {
             if (!await exists(stopFile)) await atomicJSON(stopFile, { requestedAt: new Date(now()).toISOString(), reason: requested ? 'Worker termination requested' : 'Service expired' });
           });
           if (child && !childEnded) {
