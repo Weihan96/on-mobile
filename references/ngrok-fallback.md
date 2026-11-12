@@ -16,8 +16,8 @@ Do not use ngrok as the default for the user's own phone when Tailscale is avail
 
 ## Managed Workflow
 
-1. Build the app and start its production server with `mobile-service.mjs start`; retain its origin service ID. Do not deliver an unmanaged dev-server URL.
-2. Complete the account checks below and pass `--ngrok-account ACCOUNT_ID`. Request the URL; the helper starts an exclusive, managed ngrok agent on free port 4040. It never adopts or stops an existing agent. If 4040 is occupied, report the conflict and arrange an authorized migration or equivalent isolated supervised configuration.
+1. First inspect the existing origin and route. If ownership, binding and URL are unchanged and healthy, reuse them; deploy app updates through [origin updates](origin-updates.md). Do not recreate a tunnel just to upgrade a small app.
+2. Only when no reusable origin exists, build the app and start its production server with `mobile-service.mjs start`; retain its service ID. For a new ngrok route complete the account checks below and pass `--ngrok-account ACCOUNT_ID`. Request the URL; the helper starts an exclusive, managed ngrok agent on free port 4040. It never adopts or stops an existing agent. If 4040 is occupied, report the conflict and arrange an authorized migration or equivalent isolated supervised configuration.
 
 ```bash
 bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <port> --service <origin-service-id> --access ngrok --ngrok-account <account-id>
@@ -26,6 +26,19 @@ bun /Users/jiaxinchen/.codex/skills/on-mobile/scripts/mobile-url-for-port.mjs <p
 The agent launches its tunnel as part of its foreground command, persists the first HTTPS URL, and pins that URL on restart. It must never replace a delivered URL silently. Confirm origin, agent and public URL readiness before delivery. Report public visibility, origin service ID and exact expiry. Explicit user completion or origin expiry stops only the origin and its exclusive agent; other services and source files remain. The agent also has its own fixed seven-day expiry as a backstop.
 
 If ngrok is absent, needs authentication, or cannot resume the same URL, report the concrete blocker. Never put authentication tokens in service command arguments, receipts or logs; use ngrok's existing protected configuration. An API-created temporary tunnel under `ngrok start --none` is insufficient: it disappears when the agent restarts.
+
+## Reuse versus new allocation
+
+| Operation | Required evidence | Quota/login behavior |
+|---|---|---|
+| Read/verify an existing route, same-account/domain/origin app deployment or managed restart | Exact origin/agent ownership, unchanged config hash and persisted URL, local and public readiness | No fresh dashboard requirement merely because records are unknown/stale/reset-due. Keep the historical observation and report current unknown. |
+| New tunnel, new account selection, actual route/identity change | Explicit requested scope, verified identity/config and eligible quota evidence | Apply the creation/switch rules below; never infer available from a small probe. |
+| Provider actually returns monthly exhaustion on the current route | Reserved error header classified as 725 | Record exhaustion, report the failed request; do not claim the route is usable. Switch only under an already authorized pool or explicit selection. |
+| Changed config bytes or non-quota provider/auth failure | Inspect the changed identity or actual error | Stop the affected operation; do not classify it as exhaustion or silently select another account. |
+
+For normal reuse, call the URL helper with the original origin ID and port; an explicit account ID is optional and must match the saved route. This path never calls the fresh-quota selection function and never writes an `available` observation. `ngrokQuota` reports recorded-evidence status separately from `mobileProbe`. A historical exhausted record with a currently healthy route remains historical evidence; the probe does not rewrite that record to available. Real provider failures take precedence for the attempted request.
+
+A small installer/plugin upgrade and a future large model transfer are separate operations. Verify the small deployment now; discuss transfer size, reuse/caching and uncertain provider allowance when the large transfer is actually requested. Do not invent a requirement that quota cover an entire model before a small upgrade can ship.
 
 ## Accounts, quota evidence and bounded rotation
 
@@ -72,7 +85,7 @@ Only include numerical usage/limits actually shown. Omitted fields remain null. 
 
 ngrok's pricing page says usage refreshes on the first of each month; the free-plan page describes monthly billing cycles. Use next month first day as an estimate when account-specific reset details are unavailable, not a guaranteed midnight in the user's timezone. Reaching either provider/estimated reset time means **recheck due**, never automatic `available`.
 
-A fresh `available` observation is accepted for 30 minutes only, bound to exact email and config bytes. Stale evidence is displayed as current `unknown` with the historical observation retained. `unknown`/`exhausted` never qualify. `user-report` can record unknown/exhausted historical handoffs but cannot establish available. `provider-error` accepts only `ERR_NGROK_725` with exhausted status. Other errors—including auth, registration, concurrency, network and ordinary HTTP 403—must not be classified as monthly exhaustion. Success of a small URL probe does not establish remaining monthly quota. Automated probes classify only the reserved `ngrok-error-code` response header, never an error-code string in application content. Subsequent error observations retain still-future confirmed reset/cycle metadata and its original evidence time/source.
+For **new allocation or account selection**, a fresh `available` observation is accepted for 30 minutes only, bound to exact email and config bytes. Stale evidence is displayed as current `unknown` with the historical observation retained. `unknown`/`exhausted` never qualify for new selection; that eligibility rule is not a login requirement for healthy same-route reuse. `user-report` can record unknown/exhausted historical handoffs but cannot establish available. `provider-error` accepts only `ERR_NGROK_725` with exhausted status. Other errors—including auth, registration, concurrency, network and ordinary HTTP 403—must not be classified as monthly exhaustion. Success of a small URL probe does not establish remaining monthly quota. Automated probes classify only the reserved `ngrok-error-code` response header, never an error-code string in application content. Subsequent error observations retain still-future confirmed reset/cycle metadata and its original evidence time/source.
 
 ### Enabling automatic mode
 
@@ -89,7 +102,7 @@ bun <skill>/scripts/mobile-ngrok-accounts.mjs rotation off
 
 `authorize` binds one running origin and its unchanged expiry to the current `CODEX_THREAD_ID`; new services also record their originating chat. Never authorize a service merely because it belongs to the same OS user. For a legacy service lacking a chat owner, establish ownership from its existing delivery evidence first. Do not enroll other chats' origins. A background Markdown resume preserves its saved account and URL; it does not switch accounts without this chat-bound invocation.
 
-This mode runs **when the URL helper is invoked**. It does not install a watcher, poll all accounts, log into dashboards, or promise failover after the invocation finishes. It retains a healthy current route. On a new route it chooses the first eligible pool account; on an owned route with confirmed 725 it records exhaustion and chooses another fresh verified candidate. Unknown, stale, exhausted, reset-due, changed-config and missing accounts are skipped. Every candidate is attempted at most once, in configured priority order. A non-quota failure stops immediately; an empty eligible pool leaves the existing route untouched. `rotation off` prevents subsequent automatic runs and leaves current services running.
+This mode runs **when the URL helper is invoked**. It does not install a watcher, poll all accounts, log into dashboards, or promise failover after the invocation finishes. It retains a healthy current route. On a new route it chooses the first eligible pool account; on an owned route with confirmed 725 it records exhaustion and chooses another fresh verified candidate. Unknown, stale, exhausted, reset-due, changed-config and missing **replacement candidates** are skipped; a healthy current route is returned before candidate selection. Every candidate is attempted at most once, in configured priority order. A non-quota failure stops immediately; an empty eligible pool leaves the existing route untouched. `rotation off` prevents subsequent automatic runs and leaves current services running.
 
 Service locks protect ownership and the global rotation lock serializes ngrok creation/switching across chats, including manual operations. Lock acquisition times out after ten seconds; kernel ownership ends on process exit. Port 4040 remains exclusive. Never kill its unrelated listener to free it.
 

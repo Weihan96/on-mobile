@@ -91,3 +91,17 @@ test('account-bound wrapper selects one config, pins its domain and strips envir
   await fs.appendFile(config, '# change\n'); starts.length = 0;
   await expect(runNgrok('origin', 43210, '/bin/ngrok', deps)).rejects.toThrow('changed'); expect(starts).toHaveLength(0);
 });
+test('an owned tunnel remains running throughout bounded origin maintenance', async () => {
+  let monitored = 0;
+  deps.sleep = async ms => {
+    if (ms !== 1000) return;
+    if (++monitored === 1) {
+      const now = Date.now(); origin.status = 'maintaining'; origin.workerPid = 123;
+      origin.maintenance = { workerPid: 123, startedAt: new Date(now).toISOString(), until: new Date(Math.min(now + 30000, Date.parse(origin.expiresAt))).toISOString() };
+    } else throw new Error('maintenance monitor verified');
+  };
+  await expect(runNgrok('origin', 43210, '/bin/ngrok', deps)).rejects.toThrow('maintenance monitor verified');
+  expect(starts).toHaveLength(2); // Initial pin/reconnect only; no replacement during maintenance.
+  const receipt = JSON.parse(await fs.readFile(path.join(directory, 'ngrok.json'), 'utf8'));
+  expect(receipt.maintenanceProtocol).toBe(1);
+});

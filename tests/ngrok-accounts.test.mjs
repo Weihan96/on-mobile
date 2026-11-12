@@ -79,7 +79,7 @@ test('managed origin restart resumes the switched binding after check expiry, wi
   const deps = { check: () => { throw new Error('stale check'); }, binding: async () => binding };
   expect((await resolveAccountForRoute({ saved, requestedId: 'old-account', managedResume: true }, deps)).accountId).toBe('fixture');
   await expect(resolveAccountForRoute({ saved, requestedId: 'old-account', managedResume: false }, deps)).rejects.toThrow('explicitly');
-  await expect(resolveAccountForRoute({ saved, requestedId: 'fixture', managedResume: false }, deps)).rejects.toThrow('stale check');
+  expect((await resolveAccountForRoute({ saved, requestedId: 'fixture', managedResume: false }, deps)).accountId).toBe('fixture');
   await fs.appendFile(account.configPath, '# changed\n');
   await expect(resolveAccountForRoute({ saved, requestedId: 'old-account', managedResume: true }, deps)).rejects.toThrow('changed');
 });
@@ -88,4 +88,17 @@ test('configured domain origin is canonical before pinning', async () => {
   await fs.writeFile(inventory, `ON_MOBILE_NGROK_ACCOUNTS='${JSON.stringify([account])}'`);
   await recordCheck(account, { identity: account.email, quota: 'available', source: 'dashboard' }, checks);
   expect((await checkedAccount('fixture', { inventory, checks })).domain).toBe('https://fixture.example.invalid');
+});
+test('ordinary healthy route reuse keeps unknown/stale quota evidence unchanged and never selects a new account', async () => {
+  const { resolveAccountForRoute } = await import('../scripts/lib/ngrok-accounts.mjs');
+  await recordCheck(account, { identity: account.email, quota: 'available', source: 'dashboard' }, checks);
+  const binding = await checkedAccount('fixture', { inventory, checks });
+  for (const evidence of [{}, { fixture: { quota: 'unknown' } }, { fixture: { quota: 'exhausted', checkedAt: '2020-01-01T00:00:00Z', estimatedResetDate: '2020-02-01' } }]) {
+    const bytes = JSON.stringify(evidence); await fs.writeFile(checks, bytes);
+    const result = await resolveAccountForRoute({ saved: { agentId: 'owned', accountId: 'fixture' }, managedResume: false }, {
+      binding: async () => binding,
+      check: () => { throw new Error('Fresh selection must not run for same-route reuse'); },
+    });
+    expect(result).toEqual(binding); expect(await fs.readFile(checks, 'utf8')).toBe(bytes);
+  }
 });

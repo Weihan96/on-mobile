@@ -5,6 +5,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { originAllowsTunnel } from './lib/origin-update.mjs';
 import { readService } from './mobile-service.mjs';
 import { validateBinding } from './lib/ngrok-accounts.mjs';
 import { getNgrokTunnels } from './lib/mobile-access.mjs';
@@ -73,7 +74,7 @@ export async function runNgrok(originId, port, executable, dependencies = {}) {
   process.on('SIGTERM', signal); process.on('SIGINT', signal);
   const active = async () => {
     const origin = await read(originId), current = await read(agentId);
-    ensure(!requested && origin.status === 'running' && current.status === 'running' && origin.port === port && Date.now() < Date.parse(origin.expiresAt) && Date.now() < Date.parse(current.expiresAt), 'Origin or agent stopped, expired, or interrupted');
+    ensure(!requested && originAllowsTunnel(origin) && current.status === 'running' && origin.port === port && Date.now() < Date.parse(origin.expiresAt) && Date.now() < Date.parse(current.expiresAt), 'Origin or agent stopped, expired, or interrupted');
   };
   const terminate = async () => {
     if (!child || ended) return;
@@ -116,7 +117,7 @@ export async function runNgrok(originId, port, executable, dependencies = {}) {
     await atomicReceipt(file, { ...saved, phase: 'starting' });
     const found = await start(saved.baseUrl);
     await active();
-    await atomicReceipt(file, { ...saved, phase: 'ready', uri: found.uri, workerPid: agent.workerPid, wrapperPid: process.pid, ngrokPid: child.pid });
+    await atomicReceipt(file, { ...saved, phase: 'ready', maintenanceProtocol: 1, uri: found.uri, workerPid: agent.workerPid, wrapperPid: process.pid, ngrokPid: child.pid });
     while (true) {
       await sleep(1000); await active(); ensure(!ended, 'ngrok child exited; launchd will restore its pinned URL');
       await checkOwner(child.pid);

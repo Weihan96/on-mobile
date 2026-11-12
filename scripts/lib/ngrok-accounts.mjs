@@ -194,14 +194,14 @@ export async function validateBinding(binding) {
   return binding;
 }
 
-// A managed Markdown worker resumes its persisted route after restart. This is
-// distinct from a user requesting a new delivery or switching an account.
+// Reuse is based on the existing account binding, not a fresh quota estimate.
+// Only the managed Markdown caller may ignore its stale original account argv.
 export async function resolveAccountForRoute({ saved, requestedId, managedResume }, dependencies) {
-  if (managedResume && saved && !saved.removed && saved.agentId && saved.accountId) {
+  if (!managedResume && requestedId && saved && !saved.removed && saved.accountId && saved.accountId !== requestedId) throw new Error('Use --switch-ngrok-from to change accounts explicitly');
+  if (saved && !saved.removed && saved.agentId && saved.accountId) {
     const binding = await dependencies.binding(saved.agentId);
     ensure(binding.accountId === saved.accountId, 'Persisted route and account binding disagree');
     return validateBinding(binding);
   }
-  if (requestedId && saved && !saved.removed && saved.accountId && saved.accountId !== requestedId) throw new Error('Use --switch-ngrok-from to change accounts explicitly');
-  return dependencies.check(requestedId || (saved && !saved.removed ? saved.accountId : ''));
+  return dependencies.check(requestedId || '');
 }

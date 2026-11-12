@@ -46,6 +46,10 @@ The skill prefers private Tailscale URLs and uses ngrok when public access is re
 
 Use the bundled `mobile-delivery.mjs` for allowlisted MP4s, pages, assets and link indexes, and `mobile-links.mjs` to audit files, video bytes/codecs and existing transports. Restored services use `mobile-service.mjs start ... --inherit ORIGINAL_ID` to retain their original deadline. Supported delivery gateways can add and remove owned subpaths while preserving other routes; arbitrary existing servers require a reviewed migration. See [recovery configuration and verification](references/delivery-recovery.md).
 
+### Updating a served application
+
+Keep the same origin, port, tunnel and expiry. The owning chat can use `mobile-service.mjs update ID --cwd /absolute/new-release --ready /health --previous-ready /old-health -- bun server.mjs`, poll `status ID` for the result, and use `rollback ID` to return to the last release. Updates have a maximum 60-second maintenance window and automatic rollback on failed local readiness. Existing live workers must advertise support; an installation alone does not restart or upgrade them. Prefer app-native reload for older live workers. See [safe app updates and final URL verification](references/origin-updates.md).
+
 ### Persistent mobile mode
 
 `off`, `auto` and `always` are saved at `~/.config/on-mobile/mobile-preview-mode`, independent of the skill installation and `CODEX_HOME`. Existing `set`/`get` commands remain the supported way to change/read the preference; `on` remains an alias for `always`. Missing or invalid state reports `auto` without overwriting a saved file.
@@ -61,7 +65,7 @@ Migration retains the old file for rollback, accepts an identical preference, an
 
 ### Private ngrok accounts
 
-Keep the local account inventory at `~/.config/on-mobile/.env`, outside the installation; credentials remain in the existing protected ngrok configuration files. Run `mobile-ngrok-accounts.mjs list`, verify the selected dashboard identity/current quota, record that observation with `check`, and pass `--ngrok-account ID` to the URL or Markdown helper. Manual switching uses `--switch-ngrok-from OLD_ID`. For authorized automatic selection, configure `rotation on --accounts ID,ID`, enroll the origin with `authorize SERVICE_ID`, then use `--ngrok-auto` on the URL helper. Selection and bounded quota failover run during that invocation; no background monitor is installed. Only its owned agent is replaced; the origin and original deadline are retained. See [account checks and switching](references/ngrok-fallback.md).
+Keep the local account inventory at `~/.config/on-mobile/.env`, outside the installation; credentials remain in the existing protected ngrok configuration files. For an existing healthy route, reuse the original origin ID/port: stale or unknown quota does not require another login. For a new route/account selection, run `mobile-ngrok-accounts.mjs list`, verify the selected dashboard identity/current quota, record that observation with `check`, and pass `--ngrok-account ID` to the URL or Markdown helper. Manual switching uses `--switch-ngrok-from OLD_ID`. For authorized automatic selection, configure `rotation on --accounts ID,ID`, enroll the origin with `authorize SERVICE_ID`, then use `--ngrok-auto` on the URL helper. Selection and bounded quota failover run during that invocation; no background monitor is installed. Only its owned agent is replaced; the origin and original deadline are retained. See [account checks and switching](references/ngrok-fallback.md).
 
 Replacing or deleting only the skill installation touches neither the external account inventory nor quota history (`ngrok-checks.json`), rotation settings (`ngrok-rotation.json`), or the mode preference at `~/.config/on-mobile/mobile-preview-mode`. Download an explicit release, verify its published checksum, inspect/extract it safely, then regenerate UI metadata with `mobile-mode.mjs get`; this reads the saved preference without resetting it. Those private files are not release assets.
 
@@ -107,6 +111,8 @@ Tests cover fixed expiry, ownership, cleanup retries, crash-safe locks and pinne
 默认优先私有 Tailscale 链接；必要时使用公网 ngrok。源服务和隧道均由系统管理。用户明确确认用完才提前回收，否则创建满七天关闭；访问、播放完成、任务结束或重启都不续期。不会删除交付文件或关闭其他任务的服务。
 
 电脑仍须唤醒、联网并登录，daemon 不代表离线也能访问。ngrok 是公网服务，受账号与平台限制。端口占用时换空闲端口，不杀别人的进程；后台无法读 Documents 时，将交付内容放到稳定的 `~/.codex/mobile-previews/` 子目录；手机无法连接时检查 Tailscale/VPN；回收失败时查看日志并重试，不重置共享路由。
+
+小插件升级优先复用已有健康隧道；额度记录过期或未知，不再要求为了同一路由升级重新登录。新建/换账号仍需相应核对。应用可通过受管 `update` 原地换版本，失败按旧版健康路径回滚，原服务、端口和到期时间不变。旧常驻进程须先确认支持，安装新版脚本不会擅自重启它们。
 
 手机模式偏好固定保存在 `~/.config/on-mobile/mobile-preview-mode`；升级或重装只替换技能目录，不会重置 `off/auto/always`。旧版本用上方 `mobile-mode.mjs migrate --from` 迁移，遇到不同的已存偏好会停止，不会覆盖。安装后运行 `get` 从已存偏好重新生成界面徽标；若显示仍旧，重新加载 Codex App。
 

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createManager, readService, registerCleanup, withServiceResourceLock } from "./mobile-service.mjs";
 import { getTailscaleInfo, probeUrl, commandPath } from "./lib/mobile-access.mjs";
 import { isOwnedNgrokAgent, validateNgrokReceipt } from "./mobile-ngrok.mjs";
-import { checkedAccount, resolveAccountForRoute, readChecks, readInventory, recordCheck, rotationCandidates, withRotationLock, policyFile, validateBinding } from "./lib/ngrok-accounts.mjs";
+import { checkedAccount, resolveAccountForRoute, readChecks, readInventory, recordCheck, rotationCandidates, withRotationLock, policyFile, validateBinding, quotaStatus } from "./lib/ngrok-accounts.mjs";
 import { probeNgrok, rotateNgrok } from "./lib/ngrok-rotation.mjs";
 const scriptPath = fileURLToPath(import.meta.url);
 const ngrokWrapper = path.join(path.dirname(scriptPath), "mobile-ngrok.mjs");
@@ -406,10 +406,17 @@ async function main() {
     expiresAt = new Date(Math.min(Date.parse(expiresAt), Date.parse(result.agent.expiresAt))).toISOString();
   }
   const mobileProbe = access === "ngrok" ? await probeNgrok(url, options.timeoutMs) : await probeUrl(url, options.timeoutMs);
-  if (!mobileProbe.ok) throw new Error(`Mobile URL probe failed: ${mobileProbe.error || mobileProbe.status}`);
+  if (!mobileProbe.ok) {
+    if (access === 'ngrok' && mobileProbe.classification === 'exhausted' && options.actualNgrokAccount) {
+      const account = (await readInventory()).find(a => a.id === options.actualNgrokAccount);
+      if (account) await recordCheck(account, { identity: account.email, quota: 'exhausted', source: 'provider-error', errorCode: mobileProbe.errorCode, checkedAt: mobileProbe.checkedAt });
+    }
+    throw new Error(`Mobile URL probe failed: ${mobileProbe.errorCode || mobileProbe.error || mobileProbe.status}; existing route retained`);
+  }
+  const ngrokQuota = access === 'ngrok' ? { ...quotaStatus((await readChecks())[options.actualNgrokAccount]), note: 'Reachability is verified separately; no available-quota observation was created by this probe' } : undefined;
   await activeService(service.id, options.port);
   const result = { primaryUrl: url, access, visibility: access === "ngrok" ? "public" : "tailnet-only",
-    ngrokAccount: options.actualNgrokAccount, accountSwitch: options.switchResult, accountRotation: options.rotationResult,
+    ngrokAccount: options.actualNgrokAccount, ngrokQuota, accountSwitch: options.switchResult, accountRotation: options.rotationResult,
     localTarget, localProbe, mobileProbe, serviceId: service.id, createdAt: service.createdAt, expiresAt,
     cleanupCommand: `bun ${path.join(path.dirname(scriptPath), "mobile-service.mjs")} stop ${service.id}`,
     caveat: "Kept until explicit user completion or expiry. Host power/network/login and tailnet access still matter; sleep does not extend expiry." };
